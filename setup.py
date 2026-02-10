@@ -29,7 +29,6 @@ setup(
         'License :: OSI Approved :: MIT License',  # Again, pick a license
         'Programming Language :: Python :: 3.7',
     ],
-    data_files=[("data", ["MaaSSim/data/config.json",
-                          "MaaSSim/data/Nootdorp.csv",
+    data_files=[("data", ["MaaSSim/data/Nootdorp.csv",
                           "MaaSSim/data/Nootdorp.graphml"])]
 )

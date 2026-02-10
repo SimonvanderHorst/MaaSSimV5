@@ -127,3 +127,13 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# MaaSSim simulation outputs and local tooling
+cache/
+dumps/
+results/
+nul
+=1.0.0
+
+# Claude Code local memory/plans
+.claude/
