@@ -98,6 +98,7 @@ class Simulator:
         self.make_skims()
         self.set_variabilities()
         self.env = simpy.Environment()  # simulation environment init
+        self._congestion_schedule_injected = False
         self.t0 = self.inData.requests.treq.min()  # start at the first request time
         self.t1 = 60 * 60 * (self.params.simTime + 2)
 
@@ -126,6 +127,13 @@ class Simulator:
     #########
 
     def simulate(self, run_id=None):
+        # Auto-inject congestion schedule from config if not already done
+        if not self._congestion_schedule_injected:
+            self._congestion_schedule_injected = True
+            schedule = getattr(getattr(self.params, 'speeds', None), 'congestion_schedule', None)
+            if schedule:
+                self.env.process(self._congestion_schedule_process(schedule))
+
         # run
         self.sim_start = time.time()
         self.logger.info("-------------------\tStarting simulation\t-------------------")
@@ -218,8 +226,9 @@ class Simulator:
                 for pos in common_pos:
                     assert len(set(ride[ride.pos == pos].t.to_list() + trip[
                         trip.pos == pos].t.to_list())) > 0  # were they at the same time at the same place?
-                if not self.vars.ride:
-                    # check travel times
+                if not self.vars.ride and not hasattr(self.skims, 'ride_freeflow'):
+                    # check travel times — only valid in flat-speed mode; skip when
+                    # per-edge freeflow skim is active (skims.ride != dist/speeds.ride)
                     length = int(nx.shortest_path_length(self.inData.G, o, d, weight='length') / self.params.speeds.ride)
                     skim = self.skims.ride[o][d]
                     assert abs(skim - length) < 3
@@ -280,15 +289,89 @@ class Simulator:
             if f in self.FNAMES:
                 self.functions[f] = self.defaults[f]
 
+        # Auto-register PUDO behavioral functions if enabled and not explicitly overridden
+        if (self.params.get('pudo', {}).get('enabled', False) and
+                self.params.get('pudo', {}).get('behavioral', {}).get('enabled', False)):
+            from MaaSSim.decisions import f_pudo_driver_decline, f_pudo_rider_mode
+            if 'f_driver_decline' not in kwargs:
+                self.functions.f_driver_decline = f_pudo_driver_decline
+            if 'f_trav_mode' not in kwargs:
+                self.functions.f_trav_mode = f_pudo_rider_mode
+
         if self.functions.timeout is None:
             self.functions.timeout = self.timeout
 
     def make_skims(self):
-        # uses distance skim in meters to populate 3 skims used in simulations
+        # uses distance skim in meters to populate 4 skims used in simulations
         self.skims = DotMap()
-        self.skims.dist = self.inData.skim.copy()
-        self.skims.ride = self.skims.dist.divide(self.params.speeds.ride).astype(int).T  # <---- here we have travel time
-        self.skims.walk = self.skims.dist.divide(self.params.speeds.walk).astype(int).T  # <---- here we have travel time
+        self.skims.dist = self.inData.skim.copy()  # directed driving distances
+
+        # Ride time skim — prefer pre-computed per-edge freeflow times if available,
+        # otherwise fall back to flat speed division.
+        if isinstance(getattr(self.inData, 'ride_time', None), pd.DataFrame):
+            # ride_time CSV: same convention as dist — df[dest][orig] = time orig→dest
+            # After .T: skims.ride_freeflow[orig][dest] = time orig→dest  ✓
+            self.skims.ride_freeflow = self.inData.ride_time.T.astype(int)
+            initial_factor = getattr(self.params.speeds, 'ride_congestion', 1.0)
+            self._congestion_factor = initial_factor
+            self.skims.ride = (self.skims.ride_freeflow * initial_factor).astype(int)
+        else:
+            self.skims.ride = self.skims.dist.divide(self.params.speeds.ride).astype(int).T
+
+        # Undirected walking distances — use pre-loaded matrix if available (fast),
+        # otherwise compute via all-pairs Dijkstra and cache for subsequent calls.
+        if isinstance(getattr(self.inData, 'walk_dist', None), pd.DataFrame):
+            self.skims.walk_dist = self.inData.walk_dist
+        else:
+            G_walk = self.inData.G.to_undirected()
+            walk_skim_dict = dict(nx.all_pairs_dijkstra_path_length(G_walk, weight='length'))
+            self.skims.walk_dist = pd.DataFrame(walk_skim_dict).fillna(
+                self.params.dist_threshold).T.astype(int)
+            self.inData.walk_dist = self.skims.walk_dist  # cache for subsequent calls
+        self.skims.walk = self.skims.walk_dist.divide(self.params.speeds.walk).astype(int).T
+
+    def update_congestion_factor(self, factor):
+        """Recompute skims.ride from freeflow skim × congestion factor.
+
+        Call this mid-simulation to model time-of-day congestion changes.
+        All subsequent routing decisions will use the updated ride times.
+
+        Args:
+            factor: Slowdown multiplier ≥ 1.0.
+                    1.0 = freeflow (fastest), 3.0 = 3× slower than freeflow.
+                    Only effective when skims.ride_freeflow is available
+                    (i.e. skim_ride_time CSV was loaded). Falls back to
+                    recomputing from dist / (speeds.ride / factor) otherwise.
+        """
+        if hasattr(self.skims, 'ride_freeflow'):
+            self.skims.ride = (self.skims.ride_freeflow * factor).astype(int)
+        else:
+            effective_speed = self.params.speeds.ride / factor
+            self.skims.ride = self.skims.dist.divide(effective_speed).astype(int).T
+        self._congestion_factor = factor
+
+    def _congestion_schedule_process(self, schedule):
+        """SimPy process: applies congestion factor changes at scheduled simulation times.
+
+        Called automatically by simulate() when params.speeds.congestion_schedule is set.
+
+        Args:
+            schedule: Iterable of {time_s, factor} dicts/DotMaps, or (time_s, factor) tuples.
+                      times are seconds from simulation start.
+        """
+        current_t = 0
+        for entry in schedule:
+            if isinstance(entry, (list, tuple)):
+                t_offset, factor = entry[0], entry[1]
+            elif hasattr(entry, 'time_s'):      # DotMap (loaded from JSON config)
+                t_offset, factor = entry.time_s, entry.factor
+            else:                                # plain dict
+                t_offset, factor = entry['time_s'], entry['factor']
+            wait = t_offset - current_t
+            if wait > 0:
+                yield self.env.timeout(wait)
+            self.update_congestion_factor(factor)
+            current_t = t_offset
 
     def timeout(self, n, variability=False):
         # overwrites sim timeout to add potential stochasticity

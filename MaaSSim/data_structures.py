@@ -37,7 +37,13 @@ structures.requests = pd.DataFrame(columns=['pax',
                                             'tarr',
                                             'tdrop',
                                             'shareable',
-                                            'schedule_id']).set_index('pax')
+                                            'schedule_id',
+                                            'pudo_pickup_node',
+                                            'pudo_dropoff_node',
+                                            'walk_to_pickup_dist',
+                                            'walk_from_dropoff_dist',
+                                            'pudo_savings',
+                                            'pudo_d2d_fallback']).set_index('pax')
 
 structures.schedule = pd.DataFrame(columns=['id',
                                             'node',

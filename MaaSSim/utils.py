@@ -11,7 +11,7 @@ import random
 import numpy as np
 import os
 
-from osmnx.distance import get_nearest_node
+import osmnx as ox
 import osmnx as ox
 import networkx as nx
 import json
@@ -20,9 +20,31 @@ from .traveller import travellerEvent
 from .driver import driverEvent
 
 
+# Rider heterogeneity: per-rider beta_zero from Pellegrini & Fielbaum (2025) ASC DTD distribution for AUD, scaled to EUR by 0.60 factor (based on observed relative differences in mean values across datasets).
+_ASC_DTD_BINS_AUD = [
+    (-3.0, -2.0, 0.200), (-2.0, -1.0, 0.203), (-1.0, 0.0, 0.200),
+    (0.0, 1.0, 0.107), (1.0, 2.0, 0.058), (2.0, 3.0, 0.040),
+    (3.0, 4.0, 0.008), (4.0, 5.0, 0.008), (5.0, 8.0, 0.003),
+    (8.0, 10.0, 0.004), (10.0, 11.0, 0.015), (11.0, 12.0, 0.031),
+    (12.0, 13.0, 0.033), (13.0, 14.5, 0.033),
+]
+_asc_lows = np.array([b[0] for b in _ASC_DTD_BINS_AUD])
+_asc_highs = np.array([b[1] for b in _ASC_DTD_BINS_AUD])
+_asc_probs = np.array([b[2] for b in _ASC_DTD_BINS_AUD])
+_asc_probs = _asc_probs / _asc_probs.sum()
+
+
+def _sample_beta_zero(n, seed=None):
+    """Sample per-rider beta_zero (EUR) from empirical ASC DTD distribution."""
+    rng = np.random.RandomState(seed)
+    idx = rng.choice(len(_asc_probs), size=n, p=_asc_probs)
+    u = rng.uniform(0, 1, size=n)
+    return (_asc_lows[idx] + u * (_asc_highs[idx] - _asc_lows[idx])) * 0.60  # AUD->EUR
+
+
 def rand_node(df):
     # returns a random node of a graph
-    return df.loc[random.choice(df.index)].name
+    return df.loc[random.choice(df.index.tolist())].name
 
 
 def generic_generator(generator, n):
@@ -93,9 +115,65 @@ def networkstats(inData):
     center_x = pd.DataFrame((inData.G.nodes(data='x')))[1].mean()
     center_y = pd.DataFrame((inData.G.nodes(data='y')))[1].mean()
 
-    nearest = get_nearest_node(inData.G, (center_y, center_x))
+    # Use osmnx 0.15.1 API (for old environments) vs 2.x API (for new environments)
+    try:
+        from osmnx.distance import get_nearest_node
+        nearest = get_nearest_node(inData.G, (center_y, center_x))  # Note: (lat, lon) order
+    except ImportError:
+        # osmnx 2.x API
+        nearest = ox.distance.nearest_nodes(inData.G, center_x, center_y)
     ret = DotMap({'center': nearest, 'radius': inData.skim[nearest].quantile(0.75)})
     return ret
+
+
+def _compute_safe_nodes(G, max_speed_kmh):
+    """
+    Return frozenset of nodes NOT adjacent to any edge with speed limit > max_speed_kmh.
+
+    maxspeed parsing: numeric string → km/h; "N mph" → km/h; list → max value;
+    non-parseable/missing → highway-type fallback.
+    Highway fallbacks: motorway/trunk → 100, primary → 80, secondary → 60,
+                       tertiary/unclassified → 50, residential/service/else → 30.
+    """
+    from collections import defaultdict
+
+    _HW_FALLBACK = {
+        'motorway': 100, 'motorway_link': 100, 'trunk': 100, 'trunk_link': 100,
+        'primary': 80, 'primary_link': 80,
+        'secondary': 60, 'secondary_link': 60,
+        'tertiary': 50, 'tertiary_link': 50, 'unclassified': 50,
+    }
+
+    def _parse_speed(s):
+        if s is None:
+            return None
+        s = str(s).strip()
+        if 'mph' in s.lower():
+            try:
+                return int(float(s.lower().replace('mph', '').strip()) * 1.60934)
+            except ValueError:
+                return None
+        return int(s) if s.isdigit() else None
+
+    def _hw_fallback(hw):
+        if isinstance(hw, list):
+            hw = hw[0] if hw else ''
+        return _HW_FALLBACK.get(str(hw).strip(), 30)
+
+    node_max = defaultdict(int)
+    for u, v, _k, d in G.edges(data=True, keys=True):
+        ms = d.get('maxspeed')
+        if isinstance(ms, list):
+            parsed = [_parse_speed(s) for s in ms]
+            speed = max((x for x in parsed if x is not None), default=None)
+        else:
+            speed = _parse_speed(ms)
+        if speed is None:
+            speed = _hw_fallback(d.get('highway', ''))
+        node_max[u] = max(node_max[u], speed)
+        node_max[v] = max(node_max[v], speed)
+
+    return frozenset(n for n in G.nodes() if node_max.get(n, 0) <= max_speed_kmh)
 
 
 def load_G(_inData, _params=None, stats=True, set_t=True):
@@ -104,9 +182,37 @@ def load_G(_inData, _params=None, stats=True, set_t=True):
         _params = set_t0(_params)
     _inData.G = ox.load_graphml(_params.paths.G)
     _inData.nodes = pd.DataFrame.from_dict(dict(_inData.G.nodes(data=True)), orient='index')
+
+    # Directed driving skim
     skim = pd.read_csv(_params.paths.skim, index_col='Unnamed: 0')
     skim.columns = [int(c) for c in skim.columns]
+    skim.index = [int(i) for i in skim.index]
     _inData.skim = skim
+
+    # Undirected walking skim (optional — falls back to runtime computation in make_skims)
+    walk_path = _params.paths.get('skim_walk', None)
+    if walk_path and os.path.exists(walk_path):
+        skim_walk = pd.read_csv(walk_path, index_col='Unnamed: 0')
+        skim_walk.columns = [int(c) for c in skim_walk.columns]
+        skim_walk.index = [int(i) for i in skim_walk.index]
+        _inData.walk_dist = skim_walk
+
+    # Freeflow ride-time skim (optional — pre-computed per-edge travel times in seconds)
+    # When present, make_skims() uses this as skims.ride_freeflow instead of dist/flat_speed.
+    ride_time_path = _params.paths.get('skim_ride_time', None)
+    if ride_time_path and os.path.exists(ride_time_path):
+        skim_ride_time = pd.read_csv(ride_time_path, index_col='Unnamed: 0')
+        skim_ride_time.columns = [int(c) for c in skim_ride_time.columns]
+        skim_ride_time.index = [int(i) for i in skim_ride_time.index]
+        _inData.ride_time = skim_ride_time
+
+    # Speed-limit node filter (optional — None = no filtering)
+    max_node_speed = _params.get('max_node_speed', None)
+    if max_node_speed is not None:
+        _inData.safe_nodes = _compute_safe_nodes(_inData.G, max_node_speed)
+    else:
+        _inData.safe_nodes = None
+
     if stats:
         _inData.stats = networkstats(_inData)  # calculate center of network, radius and central node
     return _inData
@@ -141,7 +247,7 @@ def generate_vehicles(_inData, nV):
     status is IDLE
     """
     vehs = list()
-    for i in range(nV + 1):
+    for i in range(nV):
         vehs.append(empty_series(_inData.vehicles, name=i))
 
     vehs = pd.concat(vehs, axis=1, keys=range(1, nV + 1)).T
@@ -171,6 +277,9 @@ def generate_demand(_inData, _params=None, avg_speed=False):
     distances = _inData.skim[_inData.stats['center']].to_frame().dropna()  # compute distances from center
     distances.columns = ['distance']
     distances = distances[distances['distance'] < _params.dist_threshold]
+    # Exclude nodes on high-speed roads from demand sampling
+    if getattr(_inData, 'safe_nodes', None) is not None:
+        distances = distances[distances.index.isin(_inData.safe_nodes)]
     # apply negative exponential distributions
     distances['p_origin'] = distances['distance'].apply(lambda x:
                                                         math.exp(
@@ -185,6 +294,25 @@ def generate_demand(_inData, _params=None, avg_speed=False):
         treq = np.random.normal(_params.simTime * 60 * 60 / 2,
                                 _params.demand_structure.temporal_dispertion * _params.simTime * 60 * 60 / 2,
                                 _params.nP)  # apply normal distribution on request times
+    elif _params.demand_structure.temporal_distribution == 'profile':
+        profile = getattr(_params.demand_structure, 'temporal_profile', None)
+        if not profile:
+            raise ValueError("temporal_distribution='profile' requires demand_structure.temporal_profile "
+                             "to be a non-empty list of weights")
+        weights = np.array(profile, dtype=float)
+        weights /= weights.sum()
+        n_slots = len(weights)
+        total_seconds = _params.simTime * 60 * 60
+        slot_duration = total_seconds / n_slots
+        counts = np.random.multinomial(_params.nP, weights)
+        treq_parts = []
+        for slot_idx, count in enumerate(counts):
+            if count == 0:
+                continue
+            slot_start = slot_idx * slot_duration
+            offset = slot_start + np.random.uniform(0, slot_duration, count) - total_seconds / 2
+            treq_parts.append(offset)
+        treq = np.concatenate(treq_parts)
     else:
         treq = None
     requests.treq = [_params.t0 + pd.Timedelta(int(_), 's') for _ in treq]
@@ -219,6 +347,12 @@ def generate_demand(_inData, _params=None, avg_speed=False):
     _inData.passengers.pos = _inData.requests.origin
 
     _inData.passengers.platforms = _inData.passengers.platforms.apply(lambda x: [0])
+
+    # Rider heterogeneity: assign per-rider beta_zero for PUDO behavioral model.
+    # Only active when both rider_heterogeneity=true AND behavioral.enabled=true.
+    if (_params.get('pudo', {}).get('rider_heterogeneity', False) and
+            _params.get('pudo', {}).get('behavioral', {}).get('enabled', False)):
+        _inData.passengers['beta_zero'] = _sample_beta_zero(len(_inData.passengers))
 
     return _inData
 
@@ -261,8 +395,12 @@ def make_config_paths(params, main=None, rel = False):
     params.paths.sblt = os.path.join(params.paths.data, 'sblt')  # sblt results
     params.paths.G = os.path.join(params.paths.data, 'graphs',
                                   params.city.split(",")[0] + ".graphml")  # graphml of a current .city
-    params.paths.skim = os.path.join(params.paths.main, 'data', 'graphs', params.city.split(",")[
-        0] + ".csv")  # csv with a skim between the nodes of the .city
+    params.paths.skim = os.path.join(params.paths.main, 'data', 'graphs',
+                                     params.city.split(",")[0] + "_directed_driving.csv")
+    params.paths.skim_walk = os.path.join(params.paths.main, 'data', 'graphs',
+                                          params.city.split(",")[0] + "_undirected_walk.csv")
+    params.paths.skim_ride_time = os.path.join(params.paths.main, 'data', 'graphs',
+                                               params.city.split(",")[0] + "_directed_driving_time.csv")
     params.paths.NYC = os.path.join(params.paths.main, 'data',
                                     'fhv_tripdata_2018-01.csv')  # csv with a skim between the nodes of the .city
     return params
@@ -277,7 +415,10 @@ def prep_supply_and_demand(_inData, params):
                                                           axis=1)
 
     _inData.platforms = initialize_df(_inData.platforms)
-    _inData.platforms.loc[0] = [1, 'Platform', 1]
+    batch_time_value = getattr(params, 'batch_time', 60)
+    _inData.platforms.loc[0, 'fare'] = 1
+    _inData.platforms.loc[0, 'name'] = 'Platform'
+    _inData.platforms.loc[0, 'batch_time'] = batch_time_value
     return _inData
 
 

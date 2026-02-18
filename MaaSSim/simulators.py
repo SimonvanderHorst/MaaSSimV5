@@ -6,13 +6,31 @@
 
 
 from MaaSSim.maassim import Simulator
-from MaaSSim.shared import prep_shared_rides
 from MaaSSim.utils import get_config, load_G, generate_demand, generate_vehicles, initialize_df, empty_series, \
     slice_space, read_requests_csv, read_vehicle_positions
 import pandas as pd
 from scipy.optimize import brute
 import logging
 import re
+
+
+def _make_schedule_nonshared(request):
+    """Build a sim_schedule DataFrame for a single non-shared request."""
+    columns = ['node', 'time', 'req_id', 'od']
+    df = pd.DataFrame(None, index=range(3), columns=columns)
+    df.node = [None, request.origin, request.destination]
+    df.req_id = [None, request.name, request.name]
+    df.od = [None, 'o', 'd']
+    return df
+
+
+def _prep_rides(inData):
+    """Prepare non-shared ride schedules on inData.requests."""
+    inData.requests['ride_id'] = inData.requests.index.copy()
+    inData.requests['position'] = 0
+    inData.requests['sim_schedule'] = inData.requests.apply(
+        lambda x: _make_schedule_nonshared(x), axis=1)
+    return inData
 
 
 
@@ -45,7 +63,7 @@ def single_pararun(one_slice, *args):
     return 0
 
 
-def simulate_parallel(config="../data/config/parallel.json", inData=None, params=None, search_space=None, **kwargs):
+def simulate_parallel(config="tests/config_parallel_test.json", inData=None, params=None, search_space=None, **kwargs):
     if inData is None:  # othwerwise we use what is passed
         from MaaSSim.data_structures import structures
         inData = structures.copy()  # fresh data
@@ -60,14 +78,15 @@ def simulate_parallel(config="../data/config/parallel.json", inData=None, params
         inData.vehicles = generate_vehicles(inData, params.nV)
     if len(inData.platforms) == 0:  # only if no platforms in input
         inData.platforms = initialize_df(inData.platforms)
-        inData.platforms.loc[0] = empty_series(inData.platforms)
-        inData.platforms.fare = [1]
+        inData.platforms.loc[0, 'fare'] = 1.20  # EUR/km (distance component)
+        inData.platforms.loc[0, 'fare_per_min'] = 0.42  # EUR/min (time component)
+        inData.platforms.loc[0, 'name'] = 'Platform'
+        inData.platforms.loc[0, 'batch_time'] = getattr(params, 'batch_time', 60)
         inData.vehicles.platform = 0
         inData.passengers.platforms = inData.passengers.apply(lambda x: [0], axis=1)
 
 
-    inData = prep_shared_rides(inData, params.shareability)  # obligatory to prepare schedules
-
+    inData = _prep_rides(inData)
 
     brute(func=single_pararun,
           ranges=slice_space(search_space, replications=params.parallel.get("nReplications",1)),
@@ -111,10 +130,12 @@ def simulate(config="data/config.json", inData=None, params=None, **kwargs):
         inData.vehicles = generate_vehicles(inData, params.nV)
     if len(inData.platforms) == 0:  # only if no platforms in input
         inData.platforms = initialize_df(inData.platforms)
-        inData.platforms.loc[0] = empty_series(inData.platforms)
-        inData.platforms.fare = [1]
+        inData.platforms.loc[0, 'fare'] = 1.20  # EUR/km (distance component)
+        inData.platforms.loc[0, 'fare_per_min'] = 0.42  # EUR/min (time component)
+        inData.platforms.loc[0, 'name'] = 'Platform'
+        inData.platforms.loc[0, 'batch_time'] = getattr(params, 'batch_time', 60)
 
-    inData = prep_shared_rides(inData, params.shareability)  # prepare schedules
+    inData = _prep_rides(inData)
 
 
     sim = Simulator(inData, params=params, **kwargs)  # initialize

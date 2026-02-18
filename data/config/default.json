@@ -17,19 +17,8 @@
   },
   "t0" : "17:00",
   "paths" : {
-    "G" : "../../data/graphs/Nootdorp.graphml",
-    "skim" : "../../data/graphs/Nootdorp.csv",
-    "_ipython_display_" : { },
-    "_repr_mimebundle_" : { },
-    "_repr_html_" : { },
-    "_repr_markdown_" : { },
-    "_repr_svg_" : { },
-    "_repr_png_" : { },
-    "_repr_pdf_" : { },
-    "_repr_jpeg_" : { },
-    "_repr_latex_" : { },
-    "_repr_json_" : { },
-    "_repr_javascript_" : { }
+    "G" : "data/graphs/Nootdorp.graphml",
+    "skim" : "data/graphs/Nootdorp.csv"
   },
   "dist_threshold" : 100000,
   "big_time" : 10,
@@ -39,7 +28,8 @@
     "origins_dispertion" : -3.0E-4,
     "destinations_dispertion" : -0.001,
     "temporal_dispertion" : 0.3,
-    "temporal_distribution" : "uniform"
+    "temporal_distribution" : "uniform",
+    "temporal_profile" : [1, 1, 1, 1]
   },
   "shareability" : {
     "windows" : {
@@ -63,15 +53,22 @@
     "nReplications" : 2
   },
   "nD" : 1,
-  "_ipython_display_" : { },
-  "_repr_mimebundle_" : { },
-  "_repr_html_" : { },
-  "_repr_markdown_" : { },
-  "_repr_svg_" : { },
-  "_repr_png_" : { },
-  "_repr_pdf_" : { },
-  "_repr_jpeg_" : { },
-  "_repr_latex_" : { },
-  "_repr_json_" : { },
-  "_repr_javascript_" : { }
+  "pudo": {
+    "enabled" : false,
+    "max_walking_distance" : 200,
+    "walking_speed" : 1.2,
+    "operating_cost_per_km" : 0.3,
+    "static_rider_incentive" : 0.5,
+    "static_driver_incentive" : 0.5,
+    "beta_walk" : 1.0,
+    "beta_drive" : 0.5,
+    "friction_cost" : 0.5,
+    "behavioral" : {
+      "enabled" : false,
+      "rider_beta_walk" : 0.24,
+      "rider_C_zero" : 0.52,
+      "driver_lambda_bonus" : 2.0,
+      "driver_VOT_pickup" : 1.26
+    }
+  }
 }
