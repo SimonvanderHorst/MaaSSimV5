@@ -67,7 +67,7 @@ class PlatformAgent(object):
         self.id = platform_id  # reference in the list of simulated processes
         self.platform = self.sim.inData.platforms.loc[self.id].copy()  # reference to the platform
         self.f_match = self.sim.functions.f_match  # handles process of exiting due to previous experience
-        self.event_based = self.sim.defaults.get('event_based', True)  # way of handling the reuqests
+        self.event_based = self.sim.params.get('event_based', True)  # way of handling the reuqests
         self.batch_time = self.platform.batch_time  # time interval [s] to match the requests
         self.resource = simpy.Resource(self.sim.env, capacity=1000)
         self.vehQ = list()  # list of ids of queuing vehicles
@@ -75,6 +75,7 @@ class PlatformAgent(object):
         self.offers = dict()  # list of offers made to travellers
         self.monitor = self.sim.defaults.get('monitor', False)  # do we record queue lengths
         self.Qs = list()
+        self.batch_history = []  # per-batch match records for diagnostics
         self.tabu = [(-1, -1)]  # list of rejected matches [veh_id, req_id]
         self.action = self.sim.env.process(self.plat_action())  # <--- main process
 
@@ -83,7 +84,7 @@ class PlatformAgent(object):
         if self.event_based:  # either do not enter this loop
             yield self.sim.env.timeout(0)  # and handle the queue on the event
         else:  # or operate every batch time
-            yield self.sim.env.timeout(random.randint(0, self.batch_time))  # randomized at the begining
+            yield self.sim.env.timeout(random.randint(0, int(self.batch_time)))  # randomized at the begining
             while True:  # infinite loop
                 self.f_match(platform=self)  # operate in loop and match requests every batch_time
                 yield self.sim.env.timeout(self.batch_time)  # wait for next batch
@@ -151,6 +152,16 @@ class PlatformAgent(object):
         offer['status'] = -1
         veh = self.sim.vehs[offer['veh_id']]
 
+        # If this is a PUDO offer, save the PUDO fields to the request DataFrame
+        if offer.get('pudo_enabled', False):
+            req_id = offer['req_id']
+            self.sim.inData.requests.loc[req_id, 'pudo_pickup_node'] = offer['pickup_node']
+            self.sim.inData.requests.loc[req_id, 'pudo_dropoff_node'] = offer['dropoff_node']
+            self.sim.inData.requests.loc[req_id, 'walk_to_pickup_dist'] = offer['walk_to_pickup']
+            self.sim.inData.requests.loc[req_id, 'walk_from_dropoff_dist'] = offer['walk_from_dropoff']
+            self.sim.inData.requests.loc[req_id, 'pudo_savings'] = offer['savings']
+            self.sim.inData.requests.loc[req_id, 'pudo_d2d_fallback'] = offer.get('_d2d_fallback', False)
+
         for i in offer['simpaxes']:
             self.sim.pax[i].update(event=travellerEvent.ACCEPTS_OFFER)
             self.sim.pax[i].found_veh.succeed()
@@ -164,6 +175,7 @@ class PlatformAgent(object):
         # simpax.found_veh.succeed()  # raise the event for passenger
         # simpax.veh = vehicle  # assigne the vehicle to passenger
 
-        veh.requested.succeed()  # raise the revent for vehicle
+        if not veh.requested.triggered:
+            veh.requested.succeed()  # raise the event for vehicle
 
 
