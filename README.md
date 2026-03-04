@@ -127,6 +127,7 @@ for troubleshooting the installations please see the [travis.yml](https://github
 * dotmap (data structure)
 * exmas (matching trips to attractive shared rides)
 * osmnx (the most troublesome one - please follow official installation instructions [here](https://osmnx.readthedocs.io/en/stable/#installation))
+* gurobipy (MILP solver for PUDO batch matching - requires a [Gurobi license](https://www.gurobi.com/academia/academic-program-and-licenses/), free for academic use. Not needed if using greedy-first matching with `pudo.greedy_first=True`)
     
 ----
 Rafał Kucharski, 2022, rafal.kucharski [at] uj.edu.pl

@@ -9,7 +9,12 @@
 from .traveller import travellerEvent
 from .driver import driverEvent
 import pandas as pd
-import matplotlib.pyplot as plt
+
+# matplotlib is optional - only used for commented-out plotting code
+try:
+    import matplotlib.pyplot as plt
+except ImportError:
+    plt = None
 
 
 
@@ -95,12 +100,29 @@ def kpi_veh(*args, **kwargs):
     ret['OPERATIONS'] = ret['ACCEPTS_REQUEST'] + ret['DEPARTS_FROM_PICKUP'] + ret['IS_ACCEPTED_BY_TRAVELLER']
     ret['IDLE'] = ret['ENDS_SHIFT'] - ret['OPENS_APP'] - ret['OPERATIONS'] - ret['CRUISE'] - ret['WAIT'] - ret['TRAVEL']
 
-    ret['PAX_KM'] = ret.apply(lambda x: sim.inData.requests.loc[sim.runs[0].trips[
-        sim.runs[0].trips.veh_id == x.name].pax.unique()].dist.sum() / 1000, axis=1)
+    def _pax_dist_m(req):
+        """Actual driving distance in metres for a request: PUDO pickup→dropoff, D2D origin→dest."""
+        try:
+            pickup = req.get('pudo_pickup_node', None)
+            if pd.notna(pickup):
+                return float(sim.skims.dist.at[int(req.pudo_dropoff_node), int(pickup)])
+        except (KeyError, ValueError, TypeError):
+            pass
+        return float(req.dist)
+
+    # Precompute per-request distances once (avoids nested apply fragility)
+    req_dist_km = sim.inData.requests.apply(_pax_dist_m, axis=1) / 1000.0  # Series[pax_id -> km]
+
+    def _veh_pax_km(veh_row):
+        raw_ids = simrun.trips[simrun.trips.veh_id == veh_row.name].pax.dropna().unique()
+        pax_ids = [int(p) for p in raw_ids if int(p) in req_dist_km.index]
+        return req_dist_km.loc[pax_ids].sum() if pax_ids else 0.0
+
+    ret['PAX_KM'] = ret.apply(_veh_pax_km, axis=1)
 #     ret.apply(lambda x: print(sim.inData.platforms.loc[sim.inData.vehicles.loc[x.name].platform]))
 #     print(sim.inData.platforms.loc[sim.inData.vehicles.loc['name'].platform])
     
-    
+    '''
     rides = sim.inData.sblts.rides
     profits_idx = []
     for i in range(1, len(ret.index)+1):
@@ -114,10 +136,15 @@ def kpi_veh(*args, **kwargs):
 
     
     
-    
+    '''
 #     ret['REVENUE'] = ret.apply(lambda x: sim.inData.platforms.loc[sim.inData.vehicles.loc[
 #         x.name].platform].fare, axis=1)
-    ret['REVENUE'] = profits
+    ret['REVENUE'] = ret.apply(
+    lambda x: sim.inData.platforms.loc[sim.inData.vehicles.loc[x.name].platform].fare
+              * (x['nRIDES'] if pd.notnull(x['nRIDES']) else 0),
+    axis=1
+)
+    
     ret['nREJECTS'] = df[df.event==driverEvent.REJECTS_REQUEST.name].groupby(['veh']).size().reindex(ret.index)
     ret.index.name = 'veh'
     total_rev = ret['REVENUE'].sum()
@@ -139,7 +166,111 @@ def kpi_veh(*args, **kwargs):
     # KPIs
     kpi = ret.agg(['sum', 'mean', 'std'])
     kpi['nV'] = ret.shape[0]
-    return {'veh_exp': ret, 'veh_kpi': kpi, 'all_kpi': total_rev}
+    return {'veh_exp': ret, 'veh_kpi': kpi, 'all_kpi': pd.Series({'total_revenue': total_rev})}
+
+
+def calculate_pudo_metrics(sim, run_id=0):
+    """
+    Calculate PUDO-specific performance metrics.
+    Compares D2D baseline vs. realized PUDO performance.
+
+    Args:
+        sim: Simulator object
+        run_id: Run identifier (default 0)
+
+    Returns:
+        Dictionary with PUDO-specific KPIs:
+        - total_savings_offered: Total operational savings from all PUDO matches
+        - pudo_acceptance_rate: Fraction of PUDO offers that were accepted
+        - avg_walk_to_pickup: Average walking distance to pickup (meters)
+        - avg_walk_from_dropoff: Average walking distance from dropoff (meters)
+        - total_walk_distance: Total walking distance by all passengers (meters)
+        - vkt_reduction: Reduction in Vehicle Kilometers Traveled vs D2D baseline
+        - num_pudo_trips: Number of trips that used PUDO
+        - num_total_trips: Total number of trips
+    """
+    results = {}
+
+    # Filter requests that had PUDO offers
+    pudo_requests = sim.inData.requests[
+        sim.inData.requests.pudo_pickup_node.notna()
+    ]
+
+    if len(pudo_requests) == 0:
+        # No PUDO trips - return empty metrics
+        results['total_savings_offered'] = 0
+        results['pudo_acceptance_rate'] = 0
+        results['avg_walk_to_pickup'] = 0
+        results['avg_walk_from_dropoff'] = 0
+        results['total_walk_distance'] = 0
+        results['vkt_reduction'] = 0
+        results['num_pudo_trips'] = 0
+        results['num_total_trips'] = len(sim.inData.requests)
+        return results
+
+    # Total savings pool
+    results['total_savings_offered'] = pudo_requests.pudo_savings.sum()
+
+    # Acceptance rate (trips with positive savings were accepted)
+    accepted = pudo_requests[pudo_requests.pudo_savings > 0]
+    results['pudo_acceptance_rate'] = len(accepted) / len(pudo_requests) if len(pudo_requests) > 0 else 0
+
+    # Walking statistics
+    results['avg_walk_to_pickup'] = accepted.walk_to_pickup_dist.mean() if len(accepted) > 0 else 0
+    results['avg_walk_from_dropoff'] = accepted.walk_from_dropoff_dist.mean() if len(accepted) > 0 else 0
+    results['total_walk_distance'] = (
+        accepted.walk_to_pickup_dist.sum() +
+        accepted.walk_from_dropoff_dist.sum()
+    ) if len(accepted) > 0 else 0
+
+    # VKT reduction calculation
+    # Compare actual VKT (from vehicle KPI) with what D2D would have been
+    # This is a simplified calculation - can be refined based on actual trip data
+    actual_vkt = sim.res[run_id]['veh_exp']['PAX_KM'].sum() if 'veh_exp' in sim.res[run_id] else 0
+
+    # Estimate D2D VKT by adding back the savings
+    # VKT reduction ≈ total operational savings / operating_cost_per_km
+    operating_cost_per_km = sim.params.pudo.get('operating_cost_per_km', 0.3)
+    if operating_cost_per_km > 0:
+        vkt_saved = results['total_savings_offered'] / operating_cost_per_km
+        results['vkt_reduction'] = vkt_saved
+    else:
+        results['vkt_reduction'] = 0
+
+    results['num_pudo_trips'] = len(accepted)
+    results['num_total_trips'] = len(sim.inData.requests)
+
+    return results
+
+
+def calculate_vkt(sim, run_id=0):
+    """
+    Helper function to calculate total Vehicle Kilometers Traveled.
+    Includes both passenger-carrying distance (PAX_KM) and empty repositioning (CRUISE).
+
+    Args:
+        sim: Simulator object
+        run_id: Run identifier (default 0)
+
+    Returns:
+        Total VKT in kilometers (PAX_KM + CRUISE distance)
+    """
+    if run_id in sim.res and 'veh_exp' in sim.res[run_id]:
+        veh_exp = sim.res[run_id]['veh_exp']
+
+        # Passenger-carrying distance (already in km)
+        pax_km = veh_exp['PAX_KM'].sum()
+
+        # Empty repositioning distance (convert from time to distance)
+        # CRUISE is in seconds, convert to km using ride speed
+        ride_speed = getattr(sim.params.speeds, 'ride', 10)  # m/s, default 10 m/s
+        cruise_km = veh_exp['CRUISE'].sum() * ride_speed / 1000  # seconds * m/s / 1000 = km
+
+        import numpy as _np
+        total_vkt = float(_np.asarray(pax_km + cruise_km).sum())
+        return total_vkt
+    return 0.0
+
 
 
 
