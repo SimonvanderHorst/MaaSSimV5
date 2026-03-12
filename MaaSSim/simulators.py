@@ -1,5 +1,5 @@
 ################################################################################
-# Module: runners.py
+# Module: simulators.py
 # Description: Wrappers to prepare and run simulations
 # Rafal Kucharski @ TU Delft
 ################################################################################
@@ -75,13 +75,13 @@ def simulate_parallel(config="tests/config_parallel_test.json", inData=None, par
     if len(inData.passengers) == 0:  # only if no passengers in input
         inData = generate_demand(inData, params, avg_speed=True)
     if len(inData.vehicles) == 0:  # only if no vehicles in input
-        inData.vehicles = generate_vehicles(inData, params.nV)
+        inData.vehicles = generate_vehicles(inData, params.simulation.nV)
     if len(inData.platforms) == 0:  # only if no platforms in input
         inData.platforms = initialize_df(inData.platforms)
-        inData.platforms.loc[0, 'fare'] = 1.20  # EUR/km (distance component)
-        inData.platforms.loc[0, 'fare_per_min'] = 0.42  # EUR/min (time component)
+        inData.platforms.loc[0, 'fare'] = params.platform.fare_per_km
+        inData.platforms.loc[0, 'fare_per_min'] = params.platform.fare_per_min
         inData.platforms.loc[0, 'name'] = 'Platform'
-        inData.platforms.loc[0, 'batch_time'] = getattr(params, 'batch_time', 60)
+        inData.platforms.loc[0, 'batch_time'] = params.platform.batch_time
         inData.vehicles.platform = 0
         inData.passengers.platforms = inData.passengers.apply(lambda x: [0], axis=1)
 
@@ -127,20 +127,20 @@ def simulate(config="data/config.json", inData=None, params=None, **kwargs):
     if len(inData.passengers) == 0:  # only if no passengers in input
         inData = generate_demand(inData, params, avg_speed=True)
     if len(inData.vehicles) == 0:  # only if no vehicles in input
-        inData.vehicles = generate_vehicles(inData, params.nV)
+        inData.vehicles = generate_vehicles(inData, params.simulation.nV)
     if len(inData.platforms) == 0:  # only if no platforms in input
         inData.platforms = initialize_df(inData.platforms)
-        inData.platforms.loc[0, 'fare'] = 1.20  # EUR/km (distance component)
-        inData.platforms.loc[0, 'fare_per_min'] = 0.42  # EUR/min (time component)
+        inData.platforms.loc[0, 'fare'] = params.platform.fare_per_km
+        inData.platforms.loc[0, 'fare_per_min'] = params.platform.fare_per_min
         inData.platforms.loc[0, 'name'] = 'Platform'
-        inData.platforms.loc[0, 'batch_time'] = getattr(params, 'batch_time', 60)
+        inData.platforms.loc[0, 'batch_time'] = params.platform.batch_time
 
     inData = _prep_rides(inData)
 
 
     sim = Simulator(inData, params=params, **kwargs)  # initialize
 
-    for day in range(params.get('nD', 1)):  # run iterations
+    for day in range(params.simulation.nD):  # run iterations
         sim.make_and_run(run_id=day)  # prepare and SIM
         sim.output()  # calc results
         if sim.functions.f_stop_crit(sim=sim):

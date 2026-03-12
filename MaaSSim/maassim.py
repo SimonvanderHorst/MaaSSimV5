@@ -26,8 +26,6 @@ import sys
 import logging
 
 DEFAULTS = dict(f_match=f_match,
-                f_driver_learn=dummy_False,  # deprecated
-
                 f_driver_out=dummy_False,
                 f_driver_decline=dummy_False,
                 f_driver_repos=f_dummy_repos,
@@ -57,7 +55,6 @@ class Simulator:
     # that may be filled with functions to represent desired behaviour
     FNAMES = ['f_match',
               'f_trav_out',
-              'f_driver_learn',
               'f_driver_out',
               'f_trav_mode',
               'f_driver_decline',
@@ -83,8 +80,8 @@ class Simulator:
         self.res = dict()  # simulation results (processed)
         self.logger = self.init_log(**kwargs)
         self.logger.warning("""Setting up {}h simulation at {} for {} vehicles and {} passengers in {}"""
-                            .format(self.params.simTime,
-                                    self.t0, self.params.nV, self.params.nP,
+                            .format(self.params.simulation.simTime,
+                                    self.t0, self.params.simulation.nV, self.params.simulation.nP,
                                     self.params.city))
 
     ##########
@@ -100,7 +97,7 @@ class Simulator:
         self.env = simpy.Environment()  # simulation environment init
         self._congestion_schedule_injected = False
         self.t0 = self.inData.requests.treq.min()  # start at the first request time
-        self.t1 = 60 * 60 * (self.params.simTime + 2)
+        self.t1 = 60 * 60 * (self.params.simulation.simTime + 2)
 
         self.trips = list()  # report of trips
         self.rides = list()  # report of rides
@@ -212,10 +209,19 @@ class Simulator:
             r = self.inData.requests[self.inData.requests.pax_id == i].iloc[0].squeeze()  # that is his request
             o, d = r['origin'], r['destination']  # his origin and destination
             trip = trips[trips.pax == i]  # his trip
-            assert o in trip.pos.values  # was he at origin
+            # For PUDO trips, positions are pickup/dropoff nodes, not origin/destination
+            pudo_pickup = r.get('pudo_pickup_node', None)
+            is_pudo = pd.notna(pudo_pickup) and not r.get('pudo_d2d_fallback', False)
+            if is_pudo:
+                assert int(pudo_pickup) in trip.pos.values or o in trip.pos.values
+            else:
+                assert o in trip.pos.values  # was he at origin
             if travellerEvent.ARRIVES_AT_DEST.name in trip.event.values:
                 # succesful trip
-                assert d in trip.pos.values  # did he reach the destination
+                if is_pudo:
+                    assert int(r.pudo_dropoff_node) in trip.pos.values or d in trip.pos.values
+                else:
+                    assert d in trip.pos.values  # did he reach the destination
                 veh = trip.veh_id.dropna().unique()  # did he travel with vehicle
                 assert len(veh) == 1  # was there just one vehicle (should be)
                 ride = rides[rides.veh == veh[0]]
@@ -250,9 +256,6 @@ class Simulator:
                     print(trip)
                     assert flag is True
         self.logger.warning('assertion tests for simulation results - passed')
-        # except:
-        #     self.logger.info('assertion tests for simulation results - failed')
-        #     swwssw
 
     def dump(self, path=None, dump_id=None, inputs=True, results=True):
         """
@@ -326,7 +329,7 @@ class Simulator:
             G_walk = self.inData.G.to_undirected()
             walk_skim_dict = dict(nx.all_pairs_dijkstra_path_length(G_walk, weight='length'))
             self.skims.walk_dist = pd.DataFrame(walk_skim_dict).fillna(
-                self.params.dist_threshold).T.astype(int)
+                self.params.simulation.dist_threshold).T.astype(int)
             self.inData.walk_dist = self.skims.walk_dist  # cache for subsequent calls
         self.skims.walk = self.skims.walk_dist.divide(self.params.speeds.walk).astype(int).T
 

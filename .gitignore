@@ -133,7 +133,3 @@ cache/
 dumps/
 results/
 nul
-=1.0.0
-
-# Claude Code local memory/plans
-.claude/

@@ -67,7 +67,7 @@ class PlatformAgent(object):
         self.id = platform_id  # reference in the list of simulated processes
         self.platform = self.sim.inData.platforms.loc[self.id].copy()  # reference to the platform
         self.f_match = self.sim.functions.f_match  # handles process of exiting due to previous experience
-        self.event_based = self.sim.params.get('event_based', True)  # way of handling the reuqests
+        self.event_based = self.sim.params.simulation.get('event_based', True)  # way of handling the reuqests
         self.batch_time = self.platform.batch_time  # time interval [s] to match the requests
         self.resource = simpy.Resource(self.sim.env, capacity=1000)
         self.vehQ = list()  # list of ids of queuing vehicles
@@ -162,18 +162,22 @@ class PlatformAgent(object):
             self.sim.inData.requests.loc[req_id, 'pudo_savings'] = offer['savings']
             self.sim.inData.requests.loc[req_id, 'pudo_d2d_fallback'] = offer.get('_d2d_fallback', False)
 
+            # Rewrite schedule nodes so the SimPy processes drive/walk the PUDO route
+            if not offer.get('_d2d_fallback', False):
+                schedule = self.sim.inData.requests.at[req_id, 'sim_schedule']
+                schedule.loc[schedule.od == 'o', 'node'] = offer['pickup_node']
+                schedule.loc[schedule.od == 'd', 'node'] = offer['dropoff_node']
+
+        # store actual fare paid (for revenue calculation in kpi_veh)
+        self.sim.inData.requests.loc[offer['req_id'], 'final_fare'] = offer.get('fare', 0)
+
         for i in offer['simpaxes']:
             self.sim.pax[i].update(event=travellerEvent.ACCEPTS_OFFER)
             self.sim.pax[i].found_veh.succeed()
             self.sim.pax[i].my_schedule_triggered.succeed()
             self.sim.pax[i].veh = self.sim.vehicles.loc[offer['veh_id']]  # assigne the vehicle to passenger
         veh.update(event=driverEvent.ACCEPTS_REQUEST)
-        # simpax.update(event=travellerEvent.ACCEPTS_OFFER)
-
-        # veh.request = request  # assign request to vehicles
         veh.schedule = self.sim.pax[offer['simpaxes'][0]].schedule
-        # simpax.found_veh.succeed()  # raise the event for passenger
-        # simpax.veh = vehicle  # assigne the vehicle to passenger
 
         if not veh.requested.triggered:
             veh.requested.succeed()  # raise the event for vehicle

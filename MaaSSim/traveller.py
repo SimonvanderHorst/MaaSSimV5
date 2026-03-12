@@ -167,9 +167,9 @@ class PassengerAgent(object):
 
     def disp(self):
         """degugger"""
-        if self.sim.params.sleep > 0:
+        if self.sim.params.simulation.sleep > 0:
             print(self.sim.print_now(), self.rides[-1])
-            time.sleep(self.sim.params.sleep)
+            time.sleep(self.sim.params.simulation.sleep)
 
     def leave_queues(self):
         self.update(event=travellerEvent.LOSES_PATIENCE)
@@ -194,7 +194,6 @@ class PassengerAgent(object):
                 yield self.sim.timeout((self.request.treq - self.sim.t0).seconds,
                                        variability=self.sim.vars.start)  # wait IDLE until the request time
                 self.sim.requests.loc[len(self.sim.requests.index) + 1] = self.request  # append request
-                # self.trip.request_node, self.trip.pickup_node= self.pax.pos, self.request.origin
                 self.update(event=travellerEvent.REQUESTS_RIDE)
 
                 self.t_matching = self.sim.env.now
@@ -241,8 +240,10 @@ class PassengerAgent(object):
             else:
 
                 # proper trip
+                pickup_node = self.schedule.loc[1, 'node']
+                dropoff_node = self.schedule.loc[2, 'node']
                 if self.schedule_leader:
-                    self.offer['pass_walk_time'] = self.sim.skims.walk[self.pax.pos][self.request.origin]
+                    self.offer['pass_walk_time'] = self.sim.skims.walk[self.pax.pos][pickup_node]
                     yield self.sim.timeout(self.sim.params.times.transaction,
                                            variability=self.sim.vars.transaction)  # time for transaction
                     self.sim.vehs[self.veh.name].update(event=driverEvent.IS_ACCEPTED_BY_TRAVELLER)
@@ -251,14 +252,14 @@ class PassengerAgent(object):
                     # TO DO WAIT UNTIL DEPARTURE TIME OF YOUR POINT IN SCHEDULE
                     yield self.sim.timeout(10, variability=self.sim.vars.walk)
                 self.arrived_at_pick_up.succeed()
-                self.update(event=travellerEvent.ARRIVES_AT_PICKUP, pos=self.request.origin)
+                self.update(event=travellerEvent.ARRIVES_AT_PICKUP, pos=pickup_node)
                 yield self.arrived_at_pick_up & self.sim.vehs[self.veh.name].arrives_at_pick_up[self.id]
                 self.update(event=travellerEvent.MEETS_DRIVER_AT_PICKUP)
                 yield self.sim.timeout(self.sim.params.times.pickup)  # vehicle waits until you board
                 self.pickuped.succeed()
                 self.update(event=travellerEvent.DEPARTS_FROM_PICKUP)
                 yield self.sim.vehs[self.veh.name].arrives[self.id]  # wait until vehicle arrive
-                self.update(event=travellerEvent.ARRIVES_AT_DROPOFF, pos=self.request.destination)
+                self.update(event=travellerEvent.ARRIVES_AT_DROPOFF, pos=dropoff_node)
                 yield self.sim.timeout(self.sim.params.times.dropoff)  # time needed to dropoff
                 self.dropoffed.succeed()
                 self.veh = None

@@ -1,11 +1,11 @@
 {
-  "NAME":"pudo_test",
+  "NAME":"peak_12h",
   "city":"Delft, Netherlands",
   "simulation":{
-    "nP":200,
+    "nP":1200,
     "nV":20,
-    "simTime":2,
-    "t0":"17:00",
+    "simTime":12,
+    "t0":"06:00",
     "nD":1,
     "sleep":false,
     "event_based":false,
@@ -23,8 +23,18 @@
   "speeds":{
     "walk":1.2,
     "ride":4.17,
-    "ride_congestion":3.0,
-    "congestion_schedule":[]
+    "ride_congestion":1.0,
+    "congestion_schedule":[
+      {"time_s":0,     "factor":1.0},
+      {"time_s":7200,  "factor":2.0},
+      {"time_s":10800, "factor":3.0},
+      {"time_s":14400, "factor":2.0},
+      {"time_s":18000, "factor":1.0},
+      {"time_s":36000, "factor":2.0},
+      {"time_s":39600, "factor":3.0},
+      {"time_s":43200, "factor":2.0},
+      {"time_s":46800, "factor":1.0}
+    ]
   },
   "paths":{
     "G":"data/graphs/Delft.graphml",
@@ -36,7 +46,8 @@
     "origins_dispertion":-3.0E-4,
     "destinations_dispertion":-0.001,
     "temporal_dispertion":0.3,
-    "temporal_distribution":"uniform"
+    "temporal_distribution":"profile",
+    "temporal_profile":[2, 5, 4, 1, 1, 1.5, 1, 1, 1, 2, 5, 3]
   },
   "shareability":{
     "windows":{

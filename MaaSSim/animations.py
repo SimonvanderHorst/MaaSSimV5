@@ -1,5 +1,5 @@
 ################################################################################
-# Module: utils.py
+# Module: animations.py
 # Reusable functions to animate MaaSSim results
 # Rafal Kucharski @ TU Delft
 ################################################################################

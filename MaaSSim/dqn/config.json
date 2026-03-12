@@ -1,0 +1,18 @@
+{
+  "state_dim": 14,
+  "hidden_dims": [128, 128],
+  "action_n_steps": 5,
+
+  "gamma": 0.99,
+  "lr": 0.0001,
+  "batch_size": 64,
+  "buffer_capacity": 50000,
+  "warmup_steps": 500,
+  "target_sync_every": 10,
+
+  "eps_start": 1.0,
+  "eps_end": 0.05,
+  "eps_decay_steps": 50000,
+
+  "use_smoothed_reward": false
+}

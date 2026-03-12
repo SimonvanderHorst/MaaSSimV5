@@ -1,4 +1,4 @@
-# Usage:  python tools/precompute_skims.py --city "Delft, Netherlands" [--congestion-factor 0.3]
+# Usage:  python tools/precompute_skims.py --city Delft [--congestion-factor 0.3]
 # Downloads the graph from OSMnx if {city}.graphml doesn't exist yet.
 # Outputs: data/graphs/{city}_directed_driving.csv, _undirected_walk.csv, _directed_driving_time.csv
 

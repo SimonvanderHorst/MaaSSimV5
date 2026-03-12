@@ -105,7 +105,7 @@ def kpi_veh(*args, **kwargs):
         try:
             pickup = req.get('pudo_pickup_node', None)
             if pd.notna(pickup):
-                return float(sim.skims.dist.at[int(req.pudo_dropoff_node), int(pickup)])
+                return float(sim.skims.dist.at[int(pickup), int(req.pudo_dropoff_node)])
         except (KeyError, ValueError, TypeError):
             pass
         return float(req.dist)
@@ -119,51 +119,20 @@ def kpi_veh(*args, **kwargs):
         return req_dist_km.loc[pax_ids].sum() if pax_ids else 0.0
 
     ret['PAX_KM'] = ret.apply(_veh_pax_km, axis=1)
-#     ret.apply(lambda x: print(sim.inData.platforms.loc[sim.inData.vehicles.loc[x.name].platform]))
-#     print(sim.inData.platforms.loc[sim.inData.vehicles.loc['name'].platform])
-    
-    '''
-    rides = sim.inData.sblts.rides
-    profits_idx = []
-    for i in range(1, len(ret.index)+1):
-        profits_idx.append((max(pd.DataFrame(sim.vehs[i].myrides)['paxes'].to_list())))
-    print(profits_idx)
-    profits = []
-    for i in profits_idx:
-        row = sim.inData.sblts.rides['indexes_orig'].apply(lambda x: x == i)
 
-        profits.append(sim.inData.sblts.rides[row.values]['driver_revenue'].to_list()[0] if sim.inData.sblts.rides[row.values]['driver_revenue'].to_list() else 0)
+    # per-request fare (stored at accept time in handle_accepted)
+    req_fare = sim.inData.requests['final_fare'].fillna(0)
 
-    
-    
-    '''
-#     ret['REVENUE'] = ret.apply(lambda x: sim.inData.platforms.loc[sim.inData.vehicles.loc[
-#         x.name].platform].fare, axis=1)
-    ret['REVENUE'] = ret.apply(
-    lambda x: sim.inData.platforms.loc[sim.inData.vehicles.loc[x.name].platform].fare
-              * (x['nRIDES'] if pd.notnull(x['nRIDES']) else 0),
-    axis=1
-)
+    def _veh_revenue(veh_row):
+        raw_ids = simrun.trips[simrun.trips.veh_id == veh_row.name].pax.dropna().unique()
+        pax_ids = [int(p) for p in raw_ids if int(p) in req_fare.index]
+        return req_fare.loc[pax_ids].sum() if pax_ids else 0.0
+
+    ret['REVENUE'] = ret.apply(_veh_revenue, axis=1)
     
     ret['nREJECTS'] = df[df.event==driverEvent.REJECTS_REQUEST.name].groupby(['veh']).size().reindex(ret.index)
     ret.index.name = 'veh'
     total_rev = ret['REVENUE'].sum()
-# This is a code for plotting
-#plotting seaborn
-    # plot graph of driver revenue
-   # vehicles  = list(sim.vehs.keys())
-   # fig, ax = plt.subplots(figsize = (10,5))
-    #bars = ax.barh(vehicles, profits)
-   # ax.bar_label(bars)
-   # for bars in ax.containers:
-   #     ax.bar_label(bars)
-    
-
-    #plt.xlabel("Revenue")
-   # plt.ylabel("Vehicles")
-   # plt.title("revenue against driver")
-   # plt.show()
-    # KPIs
     kpi = ret.agg(['sum', 'mean', 'std'])
     kpi['nV'] = ret.shape[0]
     return {'veh_exp': ret, 'veh_kpi': kpi, 'all_kpi': pd.Series({'total_revenue': total_rev})}

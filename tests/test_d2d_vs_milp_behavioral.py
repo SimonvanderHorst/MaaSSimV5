@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 """
 Condensed same-seed comparison: D2D baseline vs Batch MILP PUDO
 with behavioral acceptance model enabled.
@@ -12,6 +11,8 @@ import sys
 import os
 import copy
 import time
+import io
+from datetime import datetime
 import numpy as np
 import networkx as nx
 import pandas as pd
@@ -24,8 +25,27 @@ from MaaSSim.maassim import Simulator
 from MaaSSim.simulators import _prep_rides
 from MaaSSim.utils import get_config, load_G, generate_demand, generate_vehicles, initialize_df
 from MaaSSim.performance import calculate_vkt, calculate_pudo_metrics
+from MaaSSim.decisions import f_pudo_driver_decline
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'config_pudo_test.json')
+
+
+def f_d2d_ratio_check(*args, **kwargs):
+    """Stage 1 rider ratio check adapted for f_trav_mode calling convention.
+
+    Rejects if (max(walk_time, dispatch_time) + matching_delay) / trip_time > 0.5
+    """
+    traveller = kwargs.get('traveller')
+    sim = traveller.sim
+    offer = list(traveller.offers.values())[0]
+    pass_walk_time = sim.skims.walk[traveller.pax.pos][traveller.request.origin]
+    veh_pickup_time = offer.get('wait_time', 0)
+    pass_matching_time = sim.env.now - traveller.t_matching
+    tt = traveller.request.ttrav
+    tt_seconds = tt.total_seconds() if hasattr(tt, 'total_seconds') else float(tt)
+    if tt_seconds <= 0:
+        return False
+    return (max(pass_walk_time, veh_pickup_time) + pass_matching_time) / tt_seconds > 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -38,14 +58,14 @@ def generate_shared_demand():
     inData = structures.copy()
     inData = load_G(inData, params, stats=True)
     inData = generate_demand(inData, params, avg_speed=True)
-    inData.vehicles = generate_vehicles(inData, params.nV)
+    inData.vehicles = generate_vehicles(inData, params.simulation.nV)
 
     if len(inData.platforms) == 0:
         inData.platforms = initialize_df(inData.platforms)
-        inData.platforms.loc[0, 'fare'] = 1.20
-        inData.platforms.loc[0, 'fare_per_min'] = 0.42
+        inData.platforms.loc[0, 'fare'] = params.platform.fare_per_km
+        inData.platforms.loc[0, 'fare_per_min'] = params.platform.fare_per_min
         inData.platforms.loc[0, 'name'] = 'Platform'
-        inData.platforms.loc[0, 'batch_time'] = getattr(params, 'batch_time', 60)
+        inData.platforms.loc[0, 'batch_time'] = params.platform.batch_time
 
     inData = _prep_rides(inData)
     return inData, params
@@ -82,7 +102,8 @@ def run_d2d(inData_base, params_base):
     inData = copy_indata(inData_base)
     params = copy.deepcopy(params_base)
     params.pudo.enabled = False
-    sim = Simulator(inData, params=params, logger_level='WARNING')
+    sim = Simulator(inData, params=params, logger_level='WARNING',
+                    f_driver_decline=f_pudo_driver_decline, f_trav_mode=f_d2d_ratio_check)
     sim.make_and_run(run_id=0)
     sim.output()
     return sim
@@ -92,7 +113,6 @@ def run_milp_pudo(inData_base, params_base):
     inData = copy_indata(inData_base)
     params = copy.deepcopy(params_base)
     params.pudo.enabled = True
-    params.pudo.greedy_first = False
     params.pudo.behavioral.enabled = True
     params.pudo.d2d_fallback = True
     params.pudo.decision_log_level = 'summary'
@@ -114,6 +134,45 @@ def _scalar(x):
     return float(x)
 
 
+def print_milp_timing(sim):
+    """Aggregate and print per-phase timing from batch_history."""
+    batches = sim.plats[0].batch_history
+    if not batches:
+        print('  No MILP batches recorded.')
+        return
+
+    phases = [
+        ('phase_a_feasibility_s', 'Feasibility'),
+        ('phase_b_cost_matrix_s', 'Cost matrix'),
+        ('phase_c_solve_s', 'LP solve'),
+        ('phase_d_offers_s', 'Offer creation'),
+    ]
+    totals = {k: 0.0 for k, _ in phases}
+    total_matches = 0
+    total_vehs = 0
+    total_reqs = 0
+
+    for b in batches:
+        t = b.get('timing', {})
+        for k, _ in phases:
+            totals[k] += t.get(k, 0.0)
+        total_matches += t.get('n_matches', 0)
+        total_vehs += t.get('n_vehicles', 0)
+        total_reqs += t.get('n_requests', 0)
+
+    grand = sum(totals.values())
+    n = len(batches)
+
+    print(f'\n  MILP Timing Breakdown ({n} batches, {total_matches} matches)')
+    print('  ' + '-' * 44)
+    for k, label in phases:
+        pct = totals[k] / grand * 100 if grand > 0 else 0
+        print(f'  Phase {k[6].upper()}  {label:<18} {totals[k]:>6.2f}s  ({pct:4.1f}%)')
+    print('  ' + '-' * 44)
+    print(f'  {"Total optimizer":<27} {grand:>6.2f}s')
+    print(f'  Avg queue sizes: {total_vehs / n:.0f} vehs, {total_reqs / n:.0f} reqs')
+
+
 def collect_kpis(sim, label):
     vkt = _scalar(calculate_vkt(sim, run_id=0))
     pax_km = _scalar(sim.res[0]['veh_exp']['PAX_KM'].sum())
@@ -122,8 +181,10 @@ def collect_kpis(sim, label):
     avg_wait = _scalar(sim.res[0]['pax_kpi'].loc['mean', 'WAIT'])
     revenue = _scalar(sim.res[0]['all_kpi']['total_revenue'])
 
+    total_requests = len(sim.inData.requests)
     kpis = dict(label=label, vkt=vkt, pax_km=pax_km, cruise_km=cruise_km,
-                n_rides=n_rides, avg_wait=avg_wait, revenue=revenue)
+                n_rides=n_rides, total_requests=total_requests,
+                avg_wait=avg_wait, revenue=revenue)
 
     if sim.params.get('pudo', {}).get('enabled', False):
         pm = calculate_pudo_metrics(sim, run_id=0)
@@ -207,37 +268,51 @@ def merge_decision_logs(sim):
 # Summary
 # ---------------------------------------------------------------------------
 
-def print_summary(d, m, outcomes_milp):
-    W = 60
-    print('\n' + '=' * W)
-    print('  D2D vs Batch MILP PUDO  (behavioral, same seed)')
-    print('=' * W)
+def format_summary(d, m, outcomes_milp, wall_d2d=None, wall_milp=None):
+    """Build summary text and return it as a string (also prints to stdout)."""
+    buf = io.StringIO()
 
-    print(f"\n  {'Metric':<25} {'D2D':>12} {'MILP':>12} {'Delta':>10}")
-    print('  ' + '-' * 52)
+    def _print(msg=''):
+        print(msg)
+        buf.write(msg + '\n')
+
+    W = 60
+    _print('\n' + '=' * W)
+    _print('  D2D vs Batch MILP PUDO  (behavioral, same seed)')
+    _print('=' * W)
+
+    _print(f"\n  {'Metric':<25} {'D2D':>12} {'MILP':>12} {'Delta':>10}")
+    _print('  ' + '-' * 52)
 
     vkt_d = (m['vkt'] - d['vkt']) / d['vkt'] * 100 if d['vkt'] > 0 else 0
-    print(f"  {'VKT (km)':<25} {d['vkt']:>12.1f} {m['vkt']:>12.1f} {vkt_d:>+9.1f}%")
-    print(f"  {'PAX KM':<25} {d['pax_km']:>12.1f} {m['pax_km']:>12.1f}")
-    print(f"  {'Cruise KM':<25} {d['cruise_km']:>12.1f} {m['cruise_km']:>12.1f}")
-    print(f"  {'Rides Completed':<25} {d['n_rides']:>12.0f} {m['n_rides']:>12.0f}")
-    print(f"  {'Avg Wait (s)':<25} {d['avg_wait']:>12.0f} {m['avg_wait']:>12.0f}")
-    print(f"  {'Revenue ($)':<25} {d['revenue']:>12.0f} {m['revenue']:>12.0f}")
+    _print(f"  {'VKT (km)':<25} {d['vkt']:>12.1f} {m['vkt']:>12.1f} {vkt_d:>+9.1f}%")
+    _print(f"  {'PAX KM':<25} {d['pax_km']:>12.1f} {m['pax_km']:>12.1f}")
+    _print(f"  {'Cruise KM':<25} {d['cruise_km']:>12.1f} {m['cruise_km']:>12.1f}")
+    _print(f"  {'Requests':<25} {d['total_requests']:>12.0f} {m['total_requests']:>12.0f}")
+    _print(f"  {'Rides Completed':<25} {d['n_rides']:>12.0f} {m['n_rides']:>12.0f}")
+    d_rate = d['n_rides'] / d['total_requests'] * 100 if d['total_requests'] > 0 else 0
+    m_rate = m['n_rides'] / m['total_requests'] * 100 if m['total_requests'] > 0 else 0
+    _print(f"  {'Completion Rate':<25} {d_rate:>11.0f}% {m_rate:>11.0f}%")
+    _print(f"  {'Avg Wait (s)':<25} {d['avg_wait']:>12.0f} {m['avg_wait']:>12.0f}")
+    _print(f"  {'Revenue ($)':<25} {d['revenue']:>12.0f} {m['revenue']:>12.0f}")
 
     if 'pudo_trips' in m:
-        print(f"\n  {'PUDO Trips':<25} {'n/a':>12} {m['pudo_trips']:>12.0f}")
-        print(f"  {'Total Trips':<25} {d['n_rides']:>12.0f} {m['total_trips']:>12.0f}")
-        print(f"  {'PUDO Acceptance':<25} {'n/a':>12} {m['pudo_acceptance']:>11.0%}")
-        print(f"  {'Avg Walk Pickup (m)':<25} {'n/a':>12} {m['avg_walk_pickup']:>12.1f}")
-        print(f"  {'Avg Walk Dropoff (m)':<25} {'n/a':>12} {m['avg_walk_dropoff']:>12.1f}")
-        print(f"  {'Total Savings ($)':<25} {'n/a':>12} {m['total_savings']:>12.2f}")
+        _print(f"\n  {'PUDO Trips':<25} {'n/a':>12} {m['pudo_trips']:>12.0f}")
+        _print(f"  {'PUDO Acceptance':<25} {'n/a':>12} {m['pudo_acceptance']:>11.0%}")
+        _print(f"  {'Avg Walk Pickup (m)':<25} {'n/a':>12} {m['avg_walk_pickup']:>12.1f}")
+        _print(f"  {'Avg Walk Dropoff (m)':<25} {'n/a':>12} {m['avg_walk_dropoff']:>12.1f}")
+        _print(f"  {'Total Savings ($)':<25} {'n/a':>12} {m['total_savings']:>12.2f}")
 
     n_pudo = int(outcomes_milp['used_pudo'].sum())
     n_fb = int(outcomes_milp['d2d_fallback'].sum())
-    print(f"\n  {'PUDO Redirect Used':<25} {'n/a':>12} {n_pudo:>12}")
-    print(f"  {'D2D Fallback Used':<25} {'n/a':>12} {n_fb:>12}")
+    _print(f"\n  {'PUDO Redirect Used':<25} {'n/a':>12} {n_pudo:>12}")
+    _print(f"  {'D2D Fallback Used':<25} {'n/a':>12} {n_fb:>12}")
 
-    print('\n' + '=' * W)
+    if wall_d2d is not None and wall_milp is not None:
+        _print(f"\n  {'Wall Clock (s)':<25} {wall_d2d:>12.1f} {wall_milp:>12.1f}")
+
+    _print('\n' + '=' * W)
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -264,12 +339,22 @@ def main():
     sim_milp = run_milp_pudo(inData_base, params_base)
     t2 = time.perf_counter()
     print(f'  MILP done ({t2 - t1:.1f}s)')
+    print_milp_timing(sim_milp)
 
     kpis_d2d = collect_kpis(sim_d2d, 'D2D')
     kpis_milp = collect_kpis(sim_milp, 'Batch MILP')
     outcomes_milp = extract_outcomes(sim_milp, 'MILP')
 
-    print_summary(kpis_d2d, kpis_milp, outcomes_milp)
+    # --- Create timestamped output folder ---
+    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    out_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                           'results', 'd2d_vs_milp_behavioral', timestamp)
+    os.makedirs(out_dir, exist_ok=True)
+
+    summary_text = format_summary(kpis_d2d, kpis_milp, outcomes_milp,
+                                   wall_d2d=t1 - t0, wall_milp=t2 - t1)
+    with open(os.path.join(out_dir, 'summary.txt'), 'w') as f:
+        f.write(summary_text)
 
     # --- Route comparison visualizations (3 successful + 3 unsuccessful) ---
     print('\n  Generating route comparison plots...')
@@ -308,8 +393,6 @@ def main():
                         if outcome_labels.get(r, '') != 'pudo_accepted']
         req_ids = successful[:3] + unsuccessful[:3]
 
-        out_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                               'results', 'route_comparison')
         from MaaSSim.visualizations import plot_route_comparison
         generated = plot_route_comparison(merged_log, sim_milp, req_ids,
                                          out_dir,
@@ -343,6 +426,8 @@ def main():
                 print(f'  Best-savings plot: {extra[0] if extra else "failed"}')
     else:
         print('  No decision logs available (decision_log_level may be off)')
+
+    print(f'\n  All results saved to: {out_dir}')
 
 
 if __name__ == '__main__':

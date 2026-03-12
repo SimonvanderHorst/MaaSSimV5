@@ -68,7 +68,7 @@ def main():
 
     print("=" * 60)
     print("  PUDO Gurobi Batch vs D2D Comparison")
-    print(f"  City: {params.city}  |  nP={params.nP}  nV={params.nV}  simTime={params.simTime}h")
+    print(f"  City: {params.city}  |  nP={params.simulation.nP}  nV={params.simulation.nV}  simTime={params.simulation.simTime}h")
     print("=" * 60)
 
     # --- D2D baseline ---
@@ -77,7 +77,6 @@ def main():
 
     # --- PUDO Gurobi batch ---
     params.pudo.enabled = True
-    params.pudo.greedy_first = False
     params.pudo.solver = 'gurobi_lp'
     pudo = run_scenario("PUDO Gurobi Batch (LP relax)", params)
 

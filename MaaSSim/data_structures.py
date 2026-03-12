@@ -24,6 +24,7 @@ structures.vehicles = pd.DataFrame(columns=['id',
 
 structures.platforms = pd.DataFrame(columns=['id',
                                              'fare',
+                                             'fare_per_min',
                                              'name',
                                              'batch_time']).set_index('id')
 
@@ -43,7 +44,8 @@ structures.requests = pd.DataFrame(columns=['pax',
                                             'walk_to_pickup_dist',
                                             'walk_from_dropoff_dist',
                                             'pudo_savings',
-                                            'pudo_d2d_fallback']).set_index('pax')
+                                            'pudo_d2d_fallback',
+                                            'final_fare']).set_index('pax')
 
 structures.schedule = pd.DataFrame(columns=['id',
                                             'node',

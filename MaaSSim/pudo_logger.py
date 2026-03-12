@@ -12,7 +12,7 @@ class PudoDecisionLog:
     """Accumulates per-batch decision data for one matching invocation.
 
     Usage:
-        log = PudoDecisionLog(batch_time=120.0, batch_type='greedy', vehQ=[1,2,3], reqQ=[10,11])
+        log = PudoDecisionLog(batch_time=120.0, batch_type='milp', vehQ=[1,2,3], reqQ=[10,11])
         log.log_feasibility(req_id=10, side='origin', ...)
         log.log_best_edge(veh_id=1, req_id=10, ...)
         ...
@@ -23,7 +23,7 @@ class PudoDecisionLog:
         """
         Args:
             batch_time: Simulation time of this batch
-            batch_type: 'greedy' or 'milp'
+            batch_type: 'milp'
             vehQ: List of vehicle IDs in queue
             reqQ: List of request IDs in queue
             log_level: 'summary' or 'full' (full includes per-combo cost details)
@@ -43,8 +43,7 @@ class PudoDecisionLog:
         self.feasibility = {}        # req_id -> {'origin': record, 'destination': record}
         self.cost_details = []       # list of CostRecord dicts (only in 'full' mode)
         self.best_per_edge = []      # list of BestEdgeRecord dicts
-        self.greedy_iterations = []  # list of GreedyIterationRecord dicts
-        self.milp_record = None      # MilpRecord dict (only for MILP batches)
+        self.milp_record = None      # MilpRecord dict
         self.offers = []             # list of OfferRecord dicts
         self.assignments = []        # final match list
 
@@ -78,7 +77,7 @@ class PudoDecisionLog:
                         dist_veh_to_origin, dist_origin_to_dest, cost_d2d,
                         dist_veh_to_pickup, dist_pickup_to_dropoff,
                         cost_pudo_vehicle, walk_to_pickup_m, walk_from_dropoff_m,
-                        cost_pudo_walking, detour_ratio, detour_penalty,
+                        cost_pudo_walking,
                         cost_pudo_total, savings, **kwargs):
         """Log cost components for one (v, q, p, d) combination. Only in 'full' mode."""
         if self.log_level != 'full':
@@ -98,8 +97,6 @@ class PudoDecisionLog:
             'walk_to_pickup_m': float(walk_to_pickup_m),
             'walk_from_dropoff_m': float(walk_from_dropoff_m),
             'cost_pudo_walking': float(cost_pudo_walking),
-            'detour_ratio': float(detour_ratio),
-            'detour_penalty': float(detour_penalty),
             'cost_pudo_total': float(cost_pudo_total),
             'savings': float(savings),
         }
@@ -116,7 +113,7 @@ class PudoDecisionLog:
 
         Args:
             cost_components: Optional dict with cost breakdown:
-                {cost_vehicle_driving, cost_walking, cost_detour_penalty,
+                {cost_vehicle_driving, cost_walking,
                  walk_to_pickup_m, walk_from_dropoff_m,
                  dist_veh_to_pickup_m, dist_pickup_to_dropoff_m}
         """
@@ -134,35 +131,6 @@ class PudoDecisionLog:
         if cost_components is not None:
             entry['components'] = {k: float(v) for k, v in cost_components.items()}
         self.best_per_edge.append(entry)
-
-    def log_greedy_iteration(self, iteration, vehQ_remaining, reqQ_remaining,
-                             skimQ_candidates, n_tabu_dropped,
-                             chosen_veh_id, chosen_req_id, chosen_pickup_time,
-                             offer_outcome):
-        """Log one iteration of the greedy matching loop.
-
-        Args:
-            iteration: Loop iteration number (0-based)
-            vehQ_remaining: Vehicle IDs still in queue
-            reqQ_remaining: Request IDs still in queue
-            skimQ_candidates: List of dicts [{veh_id, req_id, pickup_time_s}, ...]
-            n_tabu_dropped: Number of (v,q) pairs removed by tabu
-            chosen_veh_id: Selected vehicle
-            chosen_req_id: Selected request
-            chosen_pickup_time: Pickup time for the selected pair
-            offer_outcome: 'accepted', 'declined', or 'already_assigned'
-        """
-        self.greedy_iterations.append({
-            'iteration': int(iteration),
-            'vehQ_remaining': [int(v) for v in vehQ_remaining],
-            'reqQ_remaining': [int(r) for r in reqQ_remaining],
-            'skimQ_candidates': skimQ_candidates,
-            'n_tabu_dropped': int(n_tabu_dropped),
-            'chosen_veh_id': int(chosen_veh_id),
-            'chosen_req_id': int(chosen_req_id),
-            'chosen_pickup_time': float(chosen_pickup_time),
-            'offer_outcome': offer_outcome,
-        })
 
     def log_milp(self, n_variables, n_vehicle_constraints, n_request_constraints,
                  big_M, objective_coefficients, solver_status, solver_time_s,
@@ -262,8 +230,6 @@ class PudoDecisionLog:
         }
         if self.cost_details:
             d['cost_details'] = self.cost_details
-        if self.greedy_iterations:
-            d['greedy_iterations'] = self.greedy_iterations
         if self.milp_record is not None:
             d['milp_record'] = self.milp_record
         if hasattr(self, 'behavioral_decisions') and self.behavioral_decisions:
