@@ -333,6 +333,13 @@ class Simulator:
             self.inData.walk_dist = self.skims.walk_dist  # cache for subsequent calls
         self.skims.walk = self.skims.walk_dist.divide(self.params.speeds.walk).astype(int).T
 
+        # cache NumPy-backed lookups for fast skim access in PUDO optimizer
+        from MaaSSim.pudo_optimizer import _SkimLookup
+        self.skims._dist = _SkimLookup(self.skims.dist)
+        self.skims._walk_dist = _SkimLookup(self.skims.walk_dist)
+        self.skims._walk = _SkimLookup(self.skims.walk)
+        self.skims._ride = _SkimLookup(self.skims.ride)
+
     def update_congestion_factor(self, factor):
         """Recompute skims.ride from freeflow skim × congestion factor.
 
@@ -352,6 +359,8 @@ class Simulator:
             effective_speed = self.params.speeds.ride / factor
             self.skims.ride = self.skims.dist.divide(effective_speed).astype(int).T
         self._congestion_factor = factor
+        from MaaSSim.pudo_optimizer import _SkimLookup
+        self.skims._ride = _SkimLookup(self.skims.ride)
 
     def _congestion_schedule_process(self, schedule):
         """SimPy process: applies congestion factor changes at scheduled simulation times.
@@ -393,6 +402,20 @@ class Simulator:
         self.vars.dropoff = False
         self.vars.shift = False
         self.vars.pickup_patience = False
+
+    def cleanup(self):
+        # break circular refs: agent.sim -> Simulator -> agent
+        for pax in self.pax.values():
+            pax.sim = None
+        for veh in self.vehs.values():
+            veh.sim = None
+        for plat in self.plats.values():
+            plat.sim = None
+        self.pax.clear()
+        self.vehs.clear()
+        self.plats.clear()
+        self.env = None
+        self.skims = None
 
     def plot_trip(self, pax_id, run_id=None):
         from MaaSSim.visualizations import plot_trip

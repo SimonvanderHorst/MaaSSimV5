@@ -16,14 +16,11 @@ from datetime import datetime
 import numpy as np
 import networkx as nx
 import pandas as pd
-from dotmap import DotMap
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from MaaSSim.data_structures import structures
 from MaaSSim.maassim import Simulator
-from MaaSSim.simulators import _prep_rides
-from MaaSSim.utils import get_config, load_G, generate_demand, generate_vehicles, initialize_df
+from MaaSSim.utils import generate_shared_demand, copy_indata
 from MaaSSim.performance import calculate_vkt, calculate_pudo_metrics
 from MaaSSim.decisions import f_pudo_driver_decline
 
@@ -46,52 +43,6 @@ def f_d2d_ratio_check(*args, **kwargs):
     if tt_seconds <= 0:
         return False
     return (max(pass_walk_time, veh_pickup_time) + pass_matching_time) / tt_seconds > 0.5
-
-
-# ---------------------------------------------------------------------------
-# Shared demand generation
-# ---------------------------------------------------------------------------
-
-def generate_shared_demand():
-    """Generate demand once for both strategies to share."""
-    params = get_config(CONFIG_PATH)
-    inData = structures.copy()
-    inData = load_G(inData, params, stats=True)
-    inData = generate_demand(inData, params, avg_speed=True)
-    inData.vehicles = generate_vehicles(inData, params.simulation.nV)
-
-    if len(inData.platforms) == 0:
-        inData.platforms = initialize_df(inData.platforms)
-        inData.platforms.loc[0, 'fare'] = params.platform.fare_per_km
-        inData.platforms.loc[0, 'fare_per_min'] = params.platform.fare_per_min
-        inData.platforms.loc[0, 'name'] = 'Platform'
-        inData.platforms.loc[0, 'batch_time'] = params.platform.batch_time
-
-    inData = _prep_rides(inData)
-    return inData, params
-
-
-def copy_indata(inData_base):
-    """Deep-copy mutable DataFrames; share read-only graph/skim."""
-    c = DotMap()
-    c.G = inData_base.G
-    c.nodes = inData_base.nodes
-    c.skim = inData_base.skim
-    c.stats = inData_base.stats
-    c.passengers = inData_base.passengers.copy()
-    c.requests = inData_base.requests.copy()
-    c.vehicles = inData_base.vehicles.copy()
-    c.platforms = inData_base.platforms.copy()
-    if 'sim_schedule' in c.requests.columns:
-        c.requests['sim_schedule'] = c.requests['sim_schedule'].apply(
-            lambda x: x.copy() if isinstance(x, pd.DataFrame) else x
-        )
-    for attr in ('walk_dist', 'ride_time'):
-        if isinstance(getattr(inData_base, attr, None), pd.DataFrame):
-            setattr(c, attr, getattr(inData_base, attr))
-    if hasattr(inData_base, 'safe_nodes'):
-        c.safe_nodes = inData_base.safe_nodes
-    return c
 
 
 # ---------------------------------------------------------------------------
@@ -321,7 +272,7 @@ def format_summary(d, m, outcomes_milp, wall_d2d=None, wall_milp=None):
 
 def main():
     print('\n  Generating shared demand...')
-    inData_base, params_base = generate_shared_demand()
+    inData_base, params_base = generate_shared_demand(CONFIG_PATH)
     print(f'  {len(inData_base.passengers)} passengers, '
           f'{len(inData_base.vehicles)} vehicles, '
           f'{len(inData_base.requests)} requests')

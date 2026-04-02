@@ -114,7 +114,7 @@ def generate_demand(_inData, _params=None, avg_speed=False):
 
     df = pd.DataFrame(index=np.arange(0, _params.simulation.nP), columns=_inData.passengers.columns)
     df.status = travellerEvent.STARTS_DAY
-    df.pos = _inData.nodes.sample(_params.simulation.nP).index  # df.pos = df.apply(lambda x: rand_node(_inData.nodes), axis=1)
+    df.pos = _inData.nodes.sample(_params.simulation.nP, replace=True).index  # df.pos = df.apply(lambda x: rand_node(_inData.nodes), axis=1)
     _inData.passengers = df
     requests = pd.DataFrame(index=df.index, columns=_inData.requests.columns)
     distances = _inData.skim[_inData.stats['center']].to_frame().dropna()  # compute distances from center

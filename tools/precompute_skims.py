@@ -1,11 +1,9 @@
-# Usage:  python tools/precompute_skims.py --city Delft [--congestion-factor 0.3]
+# Usage:  python tools/precompute_skims.py --city Delft
 # Downloads the graph from OSMnx if {city}.graphml doesn't exist yet.
 # Outputs: data/graphs/{city}_directed_driving.csv, _undirected_walk.csv, _directed_driving_time.csv
 
 import argparse
 import os
-import statistics
-import sys
 import time
 
 import networkx as nx
@@ -21,13 +19,12 @@ def _all_pairs_skim(G, weight='length'):
     return pd.DataFrame(d).fillna(DIST_THRESHOLD).T.astype(int)
 
 
-def _add_freeflow_times(G, congestion_factor):
-    """Add travel_time_freeflow edge attr (OSM speed scaled by congestion_factor)."""
+def _add_freeflow_times(G):
+    """Add travel_time_freeflow edge attr from OSM speed limits."""
     G = ox.add_edge_speeds(G)
     G = ox.add_edge_travel_times(G)
     for _, _, _, data in G.edges(keys=True, data=True):
-        tt = data.get('travel_time', 0)
-        data['travel_time_freeflow'] = tt / congestion_factor if congestion_factor > 0 else tt
+        data['travel_time_freeflow'] = data.get('travel_time', 0)
     return G
 
 
@@ -48,7 +45,7 @@ def _spot_check(G, drive_dist, drive_time):
     print("  Spot-check: PASS")
 
 
-def precompute_skims(city, root=None, congestion_factor=1.0):
+def precompute_skims(city, root=None):
     root = root or os.getcwd()
     graphs = os.path.join(root, 'data', 'graphs')
     graph_path = os.path.join(graphs, f'{city}.graphml')
@@ -81,13 +78,8 @@ def precompute_skims(city, root=None, congestion_factor=1.0):
     _save_skim(walk_dist, os.path.join(graphs, f'{city}_undirected_walk.csv'), 'Saved')
 
     # Directed freeflow travel times (seconds)
-    print(f"\nFreeflow times ({n}x{n}, congestion_factor={congestion_factor})...")
-    G = _add_freeflow_times(G, congestion_factor)
-    speeds = [d['speed_kph'] for _, _, d in G.edges(data=True) if 'speed_kph' in d]
-    if speeds:
-        eff = [s * congestion_factor for s in speeds]
-        print(f"  Speeds: {min(speeds):.0f}-{max(speeds):.0f} km/h OSM, "
-              f"{min(eff):.0f}-{max(eff):.0f} km/h effective (mean {statistics.mean(eff):.1f})")
+    print(f"\nFreeflow times ({n}x{n})...")
+    G = _add_freeflow_times(G)
     t0 = time.time()
     drive_time = _all_pairs_skim(G, weight='travel_time_freeflow')
     print(f"  Computed in {time.time() - t0:.1f}s")
@@ -104,9 +96,5 @@ if __name__ == '__main__':
     p.add_argument('--city', required=True,
                    help='City name (e.g. Delft). Used as OSMnx place query if .graphml not found.')
     p.add_argument('--root', default=None, help='MaaSSim project root (default: cwd)')
-    p.add_argument('--congestion-factor', type=float, default=1.0,
-                   help='Fraction of OSM max speed (default 1.0). E.g. 0.3 = 30%% of max.')
     args = p.parse_args()
-    if args.congestion_factor <= 0:
-        sys.exit(f"ERROR: --congestion-factor must be > 0, got {args.congestion_factor}")
-    precompute_skims(city=args.city, root=args.root, congestion_factor=args.congestion_factor)
+    precompute_skims(city=args.city, root=args.root)

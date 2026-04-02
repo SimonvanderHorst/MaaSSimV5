@@ -11,40 +11,22 @@ import logging
 import time as _time
 
 
-def get_feasible_pudo_nodes(node_id, max_walk_distance, skim_walk, skim_dist,
-                            walking_speed, safe_nodes=None):
-    """
-    Find all nodes within walking distance of a given node.
+def get_feasible_pudo_nodes(node_id, max_walk_distance, walk_lookup, walk_dist_lookup,
+                            walking_speed, safe_mask=None):
+    """Find all nodes within walking distance of a given node."""
+    col = walk_dist_lookup._col_idx[node_id]
+    dists = walk_dist_lookup._arr[:, col]
+    mask = dists <= max_walk_distance
+    if safe_mask is not None:
+        mask = mask & safe_mask
 
-    Args:
-        node_id: Origin/destination node
-        max_walk_distance: Maximum walking meters
-        skim_walk: Walk time matrix (seconds)
-        skim_dist: Distance matrix (meters)
-        walking_speed: Walking speed (m/s)
-        safe_nodes: Optional frozenset of node IDs on low-speed roads (speed <= threshold).
-                    If provided, candidates are further filtered to this set.
+    rows = np.where(mask)[0]
+    node_list = walk_dist_lookup._row_nodes[rows].tolist()
+    dist_dict = {int(n): float(dists[r]) for n, r in zip(node_list, rows)}
 
-    Returns:
-        Tuple of (feasible_node_ids, walk_distances_dict, walk_times_dict)
-        - feasible_node_ids: List of node IDs within walking distance
-        - walk_distances_dict: {node_id: distance_meters} for feasible nodes
-        - walk_times_dict: {node_id: time_seconds} for feasible nodes
-    """
-    # Use raw distance skim for filtering (avoids int-truncation mismatch with stored walk distances)
-    walk_distances = skim_dist[node_id]
-    walk_times = skim_walk[node_id]
-
-    # Filter nodes within max walking distance
-    feasible_dist = walk_distances[walk_distances <= max_walk_distance]
-
-    # Exclude nodes on high-speed roads (if filter is active)
-    if safe_nodes is not None:
-        feasible_dist = feasible_dist[feasible_dist.index.isin(safe_nodes)]
-
-    node_list = feasible_dist.index.tolist()
-    dist_dict = {int(n): float(feasible_dist[n]) for n in node_list}
-    time_dict = {int(n): float(walk_times[n]) for n in node_list}
+    walk_col = walk_lookup._col_idx[node_id]
+    times = walk_lookup._arr[:, walk_col]
+    time_dict = {int(n): float(times[r]) for n, r in zip(node_list, rows)}
 
     return node_list, dist_dict, time_dict
 
@@ -68,12 +50,13 @@ class _SkimLookup:
     Preserves ``df[col][row]`` semantics using NumPy array + two index maps.
     Handles transposed skims correctly (ride, walk use .T).
     """
-    __slots__ = ('_arr', '_col_idx', '_row_idx')
+    __slots__ = ('_arr', '_col_idx', '_row_idx', '_row_nodes')
 
     def __init__(self, df):
         self._arr = df.values
         self._col_idx = {node: i for i, node in enumerate(df.columns)}
         self._row_idx = {node: i for i, node in enumerate(df.index)}
+        self._row_nodes = np.array(list(df.index))
 
     def __getitem__(self, col):
         return _SkimRow(self._arr, self._row_idx, self._col_idx[col])
@@ -107,16 +90,8 @@ def _compute_d2d_baseline(veh_pos, req_origin, req_destination,
 def _evaluate_pudo_combo(veh_pos, pickup_node, dropoff_node, req_origin, req_destination,
                          skim_dist, skim_ride, _walk_dist,
                          cost_per_meter, cost_per_second, walking_cost_per_meter,
-                         friction_cost, direct_vehicle_path, cost_d2d_total,
-                         rider_aware, ra_params=None):
-    """Evaluate a single PUDO pickup/dropoff combination.
-
-    Args:
-        ra_params: Dict with rider-aware params (walk_speed, beta_walk, beta_wait, beta_zero, alpha)
-                   Required only when rider_aware=True.
-
-    Returns dict with savings, ranking_score, rider_side_cost, cost components, and node details.
-    """
+                         friction_cost, direct_vehicle_path, cost_d2d_total):
+    """Evaluate a single PUDO pickup/dropoff combination."""
     # Vehicle cost (distance + time)
     dist_to_pickup = skim_dist[pickup_node][veh_pos]
     dist_pickup_to_dropoff = skim_dist[dropoff_node][pickup_node]
@@ -134,24 +109,9 @@ def _evaluate_pudo_combo(veh_pos, pickup_node, dropoff_node, req_origin, req_des
     cost_pudo_total = cost_pudo_vehicle
     savings = cost_d2d_total - cost_pudo_total
 
-    # rider-aware ranking — inspired by Ding et al. 2024,
-    # "Incorporating walking into ride-hailing: flexible pick-up and drop-off"
-    # alpha=0: minimize driving distance only; alpha=1: minimize walking distance
-    if rider_aware and savings > 0 and ra_params is not None:
-        t_walk_min = (walk_to_pickup + walk_from_dropoff) / ra_params['walk_speed'] / 60.0
-        t_wait_savings_min = min(walk_to_pickup / ra_params['walk_speed'], time_to_pickup) / 60.0
-        rider_side_cost = (ra_params['beta_walk'] * t_walk_min
-                           - ra_params['beta_wait'] * t_wait_savings_min
-                           + ra_params['beta_zero'])
-        ranking_score = savings - ra_params['alpha'] * rider_side_cost
-    else:
-        rider_side_cost = 0.0
-        ranking_score = savings
-
     return {
         'savings': savings,
-        'ranking_score': ranking_score,
-        'rider_side_cost': rider_side_cost,
+        'ranking_score': savings,
         'cost_pudo_vehicle': cost_pudo_vehicle,
         'cost_pudo_walking': cost_pudo_walking,
         'cost_pudo_total': cost_pudo_total,
@@ -166,7 +126,8 @@ def _evaluate_pudo_combo(veh_pos, pickup_node, dropoff_node, req_origin, req_des
 def calculate_pudo_costs(vehicles, requests, skim_dist, skim_ride,
                          feasible_origins, feasible_destinations, params,
                          fare_per_km, fare_per_min=0.0, decision_log=None,
-                         skim_walk_dist=None):
+                         skim_walk_dist=None,
+                         _lookup_dist=None, _lookup_ride=None, _lookup_walk=None):
     """
     Calculate HOLISTIC operational costs for all vehicle-request-PUDO combinations.
     Pre-selects the best PUDO pair for each (vehicle, request) combination to reduce MILP complexity.
@@ -195,26 +156,13 @@ def calculate_pudo_costs(vehicles, requests, skim_dist, skim_ride,
     walking_cost_per_meter = cost_per_meter * params.pudo.beta_walk
     friction_cost = params.pudo.friction_cost
 
-    # Rider-aware optimization parameters
-    rider_aware = params.pudo.get('rider_aware_optimization', False)
-    ra_params = None
-    if rider_aware:
-        behavioral = params.pudo.get('behavioral', {})
-        ra_params = {
-            'walk_speed': params.pudo.walking_speed,
-            'beta_walk': behavioral.get('rider_beta_walk_time', 0.24),
-            'beta_wait': behavioral.get('rider_beta_wait', 0.22),
-            'beta_zero': behavioral.get('rider_beta_zero', 0.0),
-            'alpha': params.pudo.get('rider_cost_weight', 1.0),
-        }
-
     max_dispatch_ratio = params.pudo.get('max_dispatch_ratio', float('inf'))
     max_dispatch_m = params.pudo.get('max_dispatch_distance', float('inf'))
 
-    # Wrap skim DataFrames for fast NumPy-backed lookup in inner loops
-    _skim_dist_d = _SkimLookup(skim_dist)
-    _skim_ride_d = _SkimLookup(skim_ride)
-    _walk_dist_d = _SkimLookup(_walk_dist)
+    # Reuse pre-built lookups if provided, otherwise wrap DataFrames
+    _skim_dist_d = _lookup_dist or _SkimLookup(skim_dist)
+    _skim_ride_d = _lookup_ride or _SkimLookup(skim_ride)
+    _walk_dist_d = _lookup_walk or _SkimLookup(_walk_dist)
 
     # raw arrays + index maps for vectorized lookups
     sd_a, sd_ri, sd_ci = _skim_dist_d._arr, _skim_dist_d._row_idx, _skim_dist_d._col_idx
@@ -243,108 +191,112 @@ def calculate_pudo_costs(vehicles, requests, skim_dist, skim_ride,
             )
         _req_cache[req_id] = entry
 
-    for veh_id, veh in vehicles.iterrows():
-        veh_pos = veh.pos
+    if use_vec:
+        # vectorized path — loop over requests, all vehicles at once
+        veh_ids = vehicles.index.tolist()
+        veh_positions = vehicles['pos'].values
+        V = len(veh_ids)
+        veh_sd_r = np.array([sd_ri[p] for p in veh_positions])  # (V,)
+        veh_sr_c = np.array([sr_ci[p] for p in veh_positions])  # (V,)
+
         for req_id, req in requests.iterrows():
             rc = _req_cache[req_id]
             dist_od, time_od = rc[0], rc[1]
-
-            # D2D baseline (vehicle-dependent parts only)
-            dist_to_origin = _skim_dist_d[req.origin][veh_pos]
-            time_to_origin = _skim_ride_d[veh_pos][req.origin]
-            cost_d2d = ((dist_to_origin + dist_od) * cost_per_meter +
-                        (time_to_origin + time_od) * cost_per_second)
-
-            # pre-filters
-            if dist_od > 0 and dist_to_origin / dist_od > max_dispatch_ratio:
-                continue
-            if dist_to_origin > max_dispatch_m:
-                continue
-
             pickups, dropoffs = rc[2], rc[3]
+            p_sd_r, p_sd_c, p_sr_r, p_sr_c, p_sw_r = rc[4:9]
+            d_sd_c, d_sr_r, d_sw_c = rc[9:12]
+            D = len(dropoffs)
 
-            if use_vec:
-                # vectorized inner loop
-                p_sd_r, p_sd_c, p_sr_r, p_sr_c, p_sw_r = rc[4:9] 
-                d_sd_c, d_sr_r, d_sw_c = rc[9:12]
-                D = len(dropoffs)
+            # request-only arrays — computed once, not V times
+            orig_sw_c = sw_ci[req.origin]
+            dest_sw_r = sw_ri[req.destination]
+            dp2d = sd_a[p_sd_r[:, None], d_sd_c[None, :]]        # (P, D)
+            tp2d = sr_a[d_sr_r[None, :], p_sr_c[:, None]]        # (P, D)
 
-                veh_sd_r = sd_ri[veh_pos]
-                veh_sr_c = sr_ci[veh_pos]
-                orig_sw_c = sw_ci[req.origin]
-                dest_sw_r = sw_ri[req.destination]
+            # D2D baseline for all vehicles
+            orig_sd_c = sd_ci[req.origin]
+            orig_sr_r = sr_ri[req.origin]
+            dist_to_origin = sd_a[veh_sd_r, orig_sd_c]           # (V,)
+            time_to_origin = sr_a[orig_sr_r, veh_sr_c]           # (V,)
+            cost_d2d = ((dist_to_origin + dist_od) * cost_per_meter +
+                        (time_to_origin + time_od) * cost_per_second)  # (V,)
 
-                # per-pickup (P,)
-                dtp = sd_a[veh_sd_r, p_sd_c]
-                ttp = sr_a[p_sr_r, veh_sr_c]
-                wtp = sw_a[p_sw_r, orig_sw_c]
+            # pre-filter mask
+            mask = dist_to_origin <= max_dispatch_m               # (V,)
+            if dist_od > 0:
+                mask &= (dist_to_origin / dist_od) <= max_dispatch_ratio
+            valid_idx = np.where(mask)[0]
+            if len(valid_idx) == 0:
+                continue
 
-                # per-dropoff (D,)
-                wfd = sw_a[dest_sw_r, d_sw_c]
+            # vehicle-to-pickup for valid vehicles only
+            dtp = sd_a[veh_sd_r[valid_idx, None], p_sd_c[None, :]]  # (V_v, P)
+            ttp = sr_a[p_sr_r[None, :], veh_sr_c[valid_idx, None]]  # (V_v, P)
 
-                # per-combo (P, D)
-                dp2d = sd_a[p_sd_r[:, None], d_sd_c[None, :]]
-                tp2d = sr_a[d_sr_r[None, :], p_sr_c[:, None]]
+            # PUDO cost + savings via broadcasting
+            cost_pudo = ((dtp[:, :, None] + dp2d[None, :, :]) * cost_per_meter +
+                         (ttp[:, :, None] + tp2d[None, :, :]) * cost_per_second)  # (V_v, P, D)
+            savings = cost_d2d[valid_idx, None, None] - cost_pudo                  # (V_v, P, D)
 
-                cost_pudo_arr = ((dtp[:, None] + dp2d) * cost_per_meter +
-                                 (ttp[:, None] + tp2d) * cost_per_second)
-                savings_arr = cost_d2d - cost_pudo_arr 
+            # best combo per vehicle
+            V_v = len(valid_idx)
+            flat = savings.reshape(V_v, -1)                       # (V_v, P*D)
+            best_flat = np.argmax(flat, axis=1)                   # (V_v,)
+            arange_v = np.arange(V_v)
+            best_savings = flat[arange_v, best_flat]              # (V_v,)
+            best_p, best_d = np.divmod(best_flat, D)
+            best_cost_pudo = cost_pudo.reshape(V_v, -1)[arange_v, best_flat]
 
-                if rider_aware and ra_params is not None: 
-                    tw = wtp[:, None] + wfd[None, :] 
-                    t_walk_min = tw / ra_params['walk_speed'] / 60.0
-                    t_wait_min = np.minimum(
-                        wtp[:, None] / ra_params['walk_speed'],
-                        ttp[:, None]) / 60.0
-                    rider_cost_arr = (ra_params['beta_walk'] * t_walk_min
-                                      - ra_params['beta_wait'] * t_wait_min
-                                      + ra_params['beta_zero'])
-                    ranking_arr = np.where(savings_arr > 0,
-                                           savings_arr - ra_params['alpha'] * rider_cost_arr,
-                                           savings_arr)
+            for j in range(V_v):
+                vi = valid_idx[j]
+                if best_savings[j] > 0:
+                    results.append({
+                        'veh_id': veh_ids[vi],
+                        'req_id': req_id,
+                        'savings': float(best_savings[j]),
+                        'pickup_node': pickups[int(best_p[j])],
+                        'dropoff_node': dropoffs[int(best_d[j])],
+                        'cost_d2d': float(cost_d2d[vi]),
+                        'cost_pudo': float(best_cost_pudo[j]),
+                        'rider_side_cost': 0.0,
+                        'ranking_score': float(best_savings[j]),
+                    })
                 else:
-                    ranking_arr = savings_arr
+                    results.append({
+                        'veh_id': veh_ids[vi],
+                        'req_id': req_id,
+                        'savings': 0.0,
+                        'pickup_node': req.origin,
+                        'dropoff_node': req.destination,
+                        'cost_d2d': float(cost_d2d[vi]),
+                        'cost_pudo': float(cost_d2d[vi]),
+                        'rider_side_cost': 0.0,
+                        'ranking_score': 0.0,
+                    })
 
-                best_flat = int(np.argmax(ranking_arr))
-                best_p, best_d = divmod(best_flat, D)
-                best_ranking = float(ranking_arr.flat[best_flat])
+    else:
+        # scalar fallback with per-combo decision logging
+        for veh_id, veh in vehicles.iterrows():
+            veh_pos = veh.pos
+            for req_id, req in requests.iterrows():
+                rc = _req_cache[req_id]
+                dist_od, time_od = rc[0], rc[1]
 
-                if best_ranking > 0:
-                    best_savings = float(savings_arr.flat[best_flat])
-                    best_pickup = pickups[best_p]
-                    best_dropoff = dropoffs[best_d]
-                    best_cost_pudo = float(cost_pudo_arr.flat[best_flat])
-                    if rider_aware and ra_params is not None and best_savings > 0:
-                        best_rider_side_cost = float(rider_cost_arr.flat[best_flat])
-                    else:
-                        best_rider_side_cost = 0.0
-                else:
-                    best_savings = 0.0
-                    best_ranking = 0.0
-                    best_rider_side_cost = 0.0
-                    best_pickup = req.origin
-                    best_dropoff = req.destination
-                    best_cost_pudo = cost_d2d
+                dist_to_origin = _skim_dist_d[req.origin][veh_pos]
+                time_to_origin = _skim_ride_d[veh_pos][req.origin]
+                cost_d2d = ((dist_to_origin + dist_od) * cost_per_meter +
+                            (time_to_origin + time_od) * cost_per_second)
 
-                results.append({
-                    'veh_id': veh_id,
-                    'req_id': req_id,
-                    'savings': best_savings,
-                    'pickup_node': best_pickup,
-                    'dropoff_node': best_dropoff,
-                    'cost_d2d': cost_d2d,
-                    'cost_pudo': best_cost_pudo,
-                    'rider_side_cost': best_rider_side_cost,
-                    'ranking_score': best_ranking,
-                })
+                if dist_od > 0 and dist_to_origin / dist_od > max_dispatch_ratio:
+                    continue
+                if dist_to_origin > max_dispatch_m:
+                    continue
 
-            else:
-                # --- scalar fallback with per-combo decision logging ---
+                pickups, dropoffs = rc[2], rc[3]
                 direct_vehicle_path = dist_to_origin + dist_od
 
                 best_savings = 0
                 best_ranking = 0
-                best_rider_side_cost = 0.0
                 best_pickup = req.origin
                 best_dropoff = req.destination
                 best_cost_pudo = cost_d2d
@@ -359,8 +311,7 @@ def calculate_pudo_costs(vehicles, requests, skim_dist, skim_ride,
                             req.origin, req.destination,
                             _skim_dist_d, _skim_ride_d, _walk_dist_d,
                             cost_per_meter, cost_per_second, walking_cost_per_meter,
-                            friction_cost, direct_vehicle_path, cost_d2d,
-                            rider_aware, ra_params)
+                            friction_cost, direct_vehicle_path, cost_d2d)
 
                         log_kwargs = dict(
                             veh_id=veh_id, req_id=req_id,
@@ -377,15 +328,11 @@ def calculate_pudo_costs(vehicles, requests, skim_dist, skim_ride,
                             cost_pudo_total=combo['cost_pudo_total'],
                             savings=combo['savings'],
                         )
-                        if rider_aware and combo['savings'] > 0:
-                            log_kwargs['rider_side_cost'] = combo['rider_side_cost']
-                            log_kwargs['ranking_score'] = combo['ranking_score']
                         decision_log.log_cost_detail(**log_kwargs)
 
                         if combo['ranking_score'] > best_ranking:
                             best_ranking = combo['ranking_score']
                             best_savings = combo['savings']
-                            best_rider_side_cost = combo['rider_side_cost']
                             best_pickup = pickup_node
                             best_dropoff = dropoff_node
                             best_cost_pudo = combo['cost_pudo_total']
@@ -397,9 +344,6 @@ def calculate_pudo_costs(vehicles, requests, skim_dist, skim_ride,
                                 'dist_veh_to_pickup_m': combo['dist_to_pickup'],
                                 'dist_pickup_to_dropoff_m': combo['dist_pickup_to_dropoff'],
                             }
-                            if rider_aware:
-                                best_components['rider_side_cost'] = combo['rider_side_cost']
-                                best_components['ranking_score'] = combo['ranking_score']
 
                 if best_savings >= 0:
                     results.append({
@@ -410,7 +354,7 @@ def calculate_pudo_costs(vehicles, requests, skim_dist, skim_ride,
                         'dropoff_node': best_dropoff,
                         'cost_d2d': cost_d2d,
                         'cost_pudo': best_cost_pudo,
-                        'rider_side_cost': best_rider_side_cost,
+                        'rider_side_cost': 0.0,
                         'ranking_score': best_ranking,
                     })
 
@@ -441,7 +385,6 @@ def _extract_matches(cost_matrix, selected_vq_pairs):
                 'cost_pudo': row['cost_pudo'],
             }
             match['ranking_score'] = row['ranking_score']
-            match['rider_side_cost'] = row['rider_side_cost']
             matches.append(match)
     return matches
 
@@ -591,7 +534,7 @@ def optimize_pudo_matching(sim, platform, params, decision_log=None):
 
     logging.info(f"PUDO optimization: {len(vehQ)} vehicles, {len(reqQ)} requests")
 
-    # Phase A: Find feasible PUDO nodes for each request
+    # Phase A: Find feasible PUDO nodes for each request (cached by node_id)
     t_a = _time.perf_counter()
     feasible_origins = {}
     feasible_destinations = {}
@@ -599,24 +542,44 @@ def optimize_pudo_matching(sim, platform, params, decision_log=None):
     walking_speed = params.pudo.walking_speed
 
     safe_nodes = getattr(sim.inData, 'safe_nodes', None)
+    walk_lookup = sim.skims._walk
+    walk_dist_lookup = sim.skims._walk_dist
+
+    # pre-compute boolean mask once for safe_nodes filtering
+    if safe_nodes is not None:
+        safe_mask = np.array([n in safe_nodes for n in walk_dist_lookup._row_nodes])
+    else:
+        safe_mask = None
+
+    # cache feasible nodes by node_id (walk network doesn't change mid-episode)
+    _feas_cache = getattr(sim, '_feasible_cache', None)
+    if _feas_cache is None:
+        _feas_cache = {}
+        sim._feasible_cache = _feas_cache
 
     for req_id in reqQ:
         req = requests.loc[req_id]
 
-        # Find feasible pickup nodes (undirected: pedestrians ignore one-way streets)
-        origin_nodes, origin_dists, origin_times = get_feasible_pudo_nodes(
-            req.origin, max_walk_dist,
-            sim.skims.walk, sim.skims.walk_dist, walking_speed,
-            safe_nodes=safe_nodes
-        )
+        if req.origin in _feas_cache:
+            origin_nodes, origin_dists, origin_times = _feas_cache[req.origin]
+        else:
+            origin_nodes, origin_dists, origin_times = get_feasible_pudo_nodes(
+                req.origin, max_walk_dist,
+                walk_lookup, walk_dist_lookup, walking_speed,
+                safe_mask=safe_mask
+            )
+            _feas_cache[req.origin] = (origin_nodes, origin_dists, origin_times)
         feasible_origins[req_id] = origin_nodes
 
-        # Find feasible dropoff nodes (walk_dist is symmetric, no .T needed)
-        dest_nodes, dest_dists, dest_times = get_feasible_pudo_nodes(
-            req.destination, max_walk_dist,
-            sim.skims.walk, sim.skims.walk_dist, walking_speed,
-            safe_nodes=safe_nodes
-        )
+        if req.destination in _feas_cache:
+            dest_nodes, dest_dists, dest_times = _feas_cache[req.destination]
+        else:
+            dest_nodes, dest_dists, dest_times = get_feasible_pudo_nodes(
+                req.destination, max_walk_dist,
+                walk_lookup, walk_dist_lookup, walking_speed,
+                safe_mask=safe_mask
+            )
+            _feas_cache[req.destination] = (dest_nodes, dest_dists, dest_times)
         feasible_destinations[req_id] = dest_nodes
 
         # Log feasibility
@@ -646,6 +609,9 @@ def optimize_pudo_matching(sim, platform, params, decision_log=None):
         fare_per_km=platform_fare, fare_per_min=platform_fare_per_min,
         decision_log=decision_log,
         skim_walk_dist=sim.skims.walk_dist,
+        _lookup_dist=sim.skims._dist,
+        _lookup_ride=sim.skims._ride,
+        _lookup_walk=sim.skims._walk_dist,
     )
     timing['phase_b_cost_matrix_s'] = _time.perf_counter() - t_b
     timing['n_cost_matrix_rows'] = len(cost_matrix)

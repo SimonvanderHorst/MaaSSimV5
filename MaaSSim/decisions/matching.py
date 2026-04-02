@@ -48,7 +48,7 @@ def _reject_offer(sim, platform, request, simpaxes, veh_id, req_id,
     """
     if rejected_by == 'driver':
         if veh is not None:
-            veh.update(event=driverEvent.REJECTS_REQUEST)
+            veh.update(event=driverEvent.REJECTS_REQUEST, db_update=False)
         status = -2
         pax_event = travellerEvent.IS_REJECTED_BY_VEHICLE
         if log_msg is None:
@@ -61,7 +61,7 @@ def _reject_offer(sim, platform, request, simpaxes, veh_id, req_id,
 
     platform.offers[simpaxes[0]]['status'] = status
     for i in simpaxes:
-        sim.pax[i].update(event=pax_event)
+        sim.pax[i].update(event=pax_event, db_update=False)
         sim.pax[i].offers[platform.platform.name]['status'] = status
         del sim.pax[i].offers[platform.platform.name]
 
@@ -100,29 +100,29 @@ def _calculate_offer_economics(sim, platform, match, params):
     vehicle = sim.vehicles.loc[veh_id]
 
     # Wait time (vehicle to pickup) and travel time (pickup to dropoff)
-    wait_time = sim.skims.ride[vehicle.pos][pickup_node]
-    travel_time = sim.skims.ride[pickup_node][dropoff_node]
+    wait_time = sim.skims._ride[vehicle.pos][pickup_node]
+    travel_time = sim.skims._ride[pickup_node][dropoff_node]
 
     # Walking distances (undirected — pedestrians ignore one-way streets)
-    walk_to_pickup = sim.skims.walk_dist[request.origin][pickup_node]
-    walk_from_dropoff = sim.skims.walk_dist[dropoff_node][request.destination]
+    walk_to_pickup = sim.skims._walk_dist[request.origin][pickup_node]
+    walk_from_dropoff = sim.skims._walk_dist[dropoff_node][request.destination]
 
     # Baseline D2D fare
-    d2d_ride_time = sim.skims.ride[request.origin][request.destination]
+    d2d_ride_time = sim.skims._ride[request.origin][request.destination]
     baseline_fare = _compute_baseline_fare(platform.platform, request.dist, d2d_ride_time)
 
     # Distance and time savings (D2D vs PUDO, including dispatch)
     # Note: skim_dist[B][A] = forward distance from A to B (pandas col/row convention)
-    dist_d2d = float(sim.skims.dist[request.origin][vehicle.pos] +
-                      sim.skims.dist[request.destination][request.origin])
-    dist_pudo = float(sim.skims.dist[pickup_node][vehicle.pos] +
-                       sim.skims.dist[dropoff_node][pickup_node])
+    dist_d2d = float(sim.skims._dist[request.origin][vehicle.pos] +
+                      sim.skims._dist[request.destination][request.origin])
+    dist_pudo = float(sim.skims._dist[pickup_node][vehicle.pos] +
+                       sim.skims._dist[dropoff_node][pickup_node])
     delta_dist_m = dist_d2d - dist_pudo
 
-    time_d2d = float(sim.skims.ride[vehicle.pos][request.origin] +
-                      sim.skims.ride[request.origin][request.destination])
-    time_pudo = float(sim.skims.ride[vehicle.pos][pickup_node] +
-                       sim.skims.ride[pickup_node][dropoff_node])
+    time_d2d = float(sim.skims._ride[vehicle.pos][request.origin] +
+                      sim.skims._ride[request.origin][request.destination])
+    time_pudo = float(sim.skims._ride[vehicle.pos][pickup_node] +
+                       sim.skims._ride[pickup_node][dropoff_node])
     delta_time_s = time_d2d - time_pudo
 
     # Fare margin (ΔΠ)
@@ -226,10 +226,12 @@ def create_pudo_offer(sim, platform, match, params, decision_log=None):
     simpaxes = request.sim_schedule.req_id.dropna().unique()
     simpax = sim.pax[simpaxes[0]]
 
-    # Update events
-    veh.update(event=driverEvent.RECEIVES_REQUEST)
+    # skip dataframe sync — only event changes, nothing reads .event from the df.
+    # if i add a decision-time delay (yield timeout), flip these back to True
+    # so the df reflects intermediate state for any new mid-delay readers.
+    veh.update(event=driverEvent.RECEIVES_REQUEST, db_update=False)
     for i in simpaxes:
-        sim.pax[i].update(event=travellerEvent.RECEIVES_OFFER)
+        sim.pax[i].update(event=travellerEvent.RECEIVES_OFFER, db_update=False)
 
     # Check if traveller already assigned
     if simpax.veh is not None:
@@ -416,39 +418,36 @@ def f_match_pudo(**kwargs):
                           decision_log=decision_log)
     timing['phase_d_offers_s'] = _time.perf_counter() - t_d
 
-    # Record batch history
-    batch_matches = []
-    for m in matches:
-        req = sim.inData.requests.loc[m['req_id']]
-        match_entry = {
-            'veh_id': m['veh_id'],
-            'veh_pos': int(sim.vehicles.loc[m['veh_id']].pos),
-            'req_id': m['req_id'],
-            'origin': int(req.origin),
-            'destination': int(req.destination),
-            'pickup_node': int(m['pickup_node']),
-            'dropoff_node': int(m['dropoff_node']),
-            'savings': m['savings'],
-            'cost_d2d': m['cost_d2d'],
-            'cost_pudo': m['cost_pudo'],
-        }
-        if 'ranking_score' in m:
-            match_entry['ranking_score'] = m['ranking_score']
-            match_entry['rider_side_cost'] = m['rider_side_cost']
-        batch_matches.append(match_entry)
-
+    # Record batch history (lightweight mode skips match dicts)
+    lightweight = getattr(sim, '_lightweight_history', False)
     batch_entry = {
         't': sim.env.now,
         'batch_type': 'milp',
         'vehQ_size': len(vehQ_snapshot),
         'reqQ_size': len(reqQ_snapshot),
         'num_matches': len(matches),
-        'matches': batch_matches,
         'timing': timing,
     }
-    if decision_log is not None:
-        decision_log.assignments = batch_matches
-        batch_entry['decision_log'] = decision_log.to_dict()
+    if not lightweight:
+        batch_matches = []
+        for m in matches:
+            req = sim.inData.requests.loc[m['req_id']]
+            batch_matches.append({
+                'veh_id': m['veh_id'],
+                'veh_pos': int(sim.vehicles.loc[m['veh_id']].pos),
+                'req_id': m['req_id'],
+                'origin': int(req.origin),
+                'destination': int(req.destination),
+                'pickup_node': int(m['pickup_node']),
+                'dropoff_node': int(m['dropoff_node']),
+                'savings': m['savings'],
+                'cost_d2d': m['cost_d2d'],
+                'cost_pudo': m['cost_pudo'],
+            })
+        batch_entry['matches'] = batch_matches
+        if decision_log is not None:
+            decision_log.assignments = batch_matches
+            batch_entry['decision_log'] = decision_log.to_dict()
     platform.batch_history.append(batch_entry)
 
     # Update queues after all offers created

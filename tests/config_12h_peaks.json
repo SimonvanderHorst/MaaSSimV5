@@ -1,8 +1,9 @@
 {
   "NAME":"peak_12h",
   "city":"Delft, Netherlands",
+  "max_node_speed":50,
   "simulation":{
-    "nP":1200,
+    "nP":3500,
     "nV":20,
     "simTime":12,
     "t0":"06:00",
@@ -92,15 +93,13 @@
     "friction_cost":0.5,
     "decision_log_level":"off",
     "d2d_fallback":true,
-    "rider_aware_optimization":false,
-    "rider_cost_weight":1.0,
     "behavioral":{
       "enabled":true,
       "rider_beta_wait":0.22,
       "rider_beta_walk_time":0.24,
       "rider_beta_zero":0.0,
       "rider_sigmoid_scale":1.0,
-      "driver_lambda_bonus":2.0,
+      "driver_lambda_bonus":1.0,
       "driver_beta_time":0.004,
       "driver_C_friction":0.15,
       "driver_sigmoid_scale":1.0

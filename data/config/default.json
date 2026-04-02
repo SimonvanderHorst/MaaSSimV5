@@ -67,7 +67,7 @@
       "enabled" : false,
       "rider_beta_walk" : 0.24,
       "rider_C_zero" : 0.52,
-      "driver_lambda_bonus" : 2.0,
+      "driver_lambda_bonus" : 1.0,
       "driver_VOT_pickup" : 1.26
     }
   }
