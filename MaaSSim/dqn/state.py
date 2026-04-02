@@ -45,13 +45,50 @@ class StateNormalizer:
         self._std = d['_std']
 
 
+class RewardRangeTracker:
+    """Track reward min/max during warmup, freeze to set C51 support range."""
+
+    def __init__(self):
+        self.frozen = False
+        self.min = float('inf')
+        self.max = float('-inf')
+        self.v_min = None
+        self.v_max = None
+
+    def observe(self, reward):
+        if self.frozen:
+            return
+        if reward < self.min:
+            self.min = reward
+        if reward > self.max:
+            self.max = reward
+
+    def freeze(self, margin=0.2):
+        self.frozen = True
+        span = self.max - self.min
+        pad = span * margin
+        self.v_min = math.floor((self.min - pad) * 2) / 2
+        self.v_max = math.ceil((self.max + pad) * 2) / 2
+
+    def state_dict(self):
+        return {'min': self.min, 'max': self.max, 'frozen': self.frozen,
+                'v_min': self.v_min, 'v_max': self.v_max}
+
+    def load_state_dict(self, d):
+        self.min = d['min']
+        self.max = d['max']
+        self.frozen = d['frozen']
+        self.v_min = d['v_min']
+        self.v_max = d['v_max']
+
+
 def build_state_vector(sim, platform, economics, match, params, beta_zero=0.0):
-    """14-dim raw state from offer context. Normalization handled by StateNormalizer."""
+    """15-dim raw state from offer context. Normalization handled by StateNormalizer."""
     req_id = match['req_id']
     request = sim.inData.requests.loc[req_id]
     request_dist = float(request.dist)
 
-    n_veh = len(platform.vehQ)
+    n_available_veh = len(platform.vehQ)
     n_req = max(len(platform.reqQ), 1)
 
     # cyclical time-of-day
@@ -79,6 +116,10 @@ def build_state_vector(sim, platform, economics, match, params, beta_zero=0.0):
                    + beta_dist * economics['delta_dist_m']
                    - c_friction * is_pudo)
 
+    # fleet utilization: fraction of total fleet currently busy
+    total_fleet = len(sim.vehicles)
+    fleet_util = (total_fleet - n_available_veh) / max(total_fleet, 1)
+
     state = np.array([
         economics['delta_pi'],
         economics['delta_dist_m'],
@@ -88,12 +129,13 @@ def build_state_vector(sim, platform, economics, match, params, beta_zero=0.0):
         economics['baseline_fare'],
         request_dist,
         beta_zero,
-        min(n_veh / n_req, 5.0),
-        float(n_veh),
+        min(n_available_veh / n_req, 5.0),
+        float(n_available_veh),
         math.sin(angle),
         math.cos(angle),
         base_rider,
         base_driver,
+        fleet_util,
     ], dtype=np.float32)
 
     return state

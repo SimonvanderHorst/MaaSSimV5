@@ -158,6 +158,11 @@ def f_pudo_rider_mode(*args, **kwargs):
     offer['_rider_alpha'] = alpha_r
     offer['_rider_accepted'] = accepts
 
+    # retroactive patch: alpha_r wasn't available when record_outcome fired
+    dqn_policy = getattr(sim, '_dqn_policy', None)
+    if dqn_policy is not None:
+        dqn_policy.patch_rider_alpha(int(offer.get('req_id', -1)), alpha_r)
+
     # Accumulate rider behavioral data on sim-level log (for post-hoc analysis)
     if not hasattr(sim, '_rider_behavioral_log'):
         sim._rider_behavioral_log = []

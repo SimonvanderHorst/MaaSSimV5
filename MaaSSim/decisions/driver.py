@@ -145,8 +145,8 @@ def f_pudo_driver_decline(*args, **kwargs):
         return False
 
     # Get behavioral parameters
-    pi_d = params.pudo.static_driver_incentive
-    lambda_bonus = behavioral.get('driver_lambda_bonus', 2.0)
+    pi_d = my_offer.get('_pi_d', params.pudo.static_driver_incentive)
+    lambda_bonus = behavioral.get('driver_lambda_bonus', 1.0)
     beta_time = behavioral.get('driver_beta_time', 0.004)          # EUR/sec
     beta_dist = params.pudo.operating_cost_per_km / 1000.0         # EUR/meter
     c_friction = behavioral.get('driver_C_friction', 0.15)         # EUR
