@@ -5,6 +5,10 @@
 from math import exp
 from dotmap import DotMap
 
+# driver S1 dispatch cap — module-level so sweep scripts can override
+WAIT_DIST_LIMIT_M = 2000.0
+MIN_FARE_EUR = 0.10
+
 
 def _compute_baseline_fare(platform_obj, dist_m, ride_time_s):
     """Compute rider-facing fare from distance + time components.
@@ -19,7 +23,8 @@ def _compute_baseline_fare(platform_obj, dist_m, ride_time_s):
     """
     fare_per_km = platform_obj.fare
     fare_per_min = getattr(platform_obj, 'fare_per_min', 0.0)
-    return fare_per_km * dist_m / 1000 + fare_per_min * ride_time_s / 60
+    booking_fee = getattr(platform_obj, 'booking_fee', 0.0)
+    return booking_fee + fare_per_km * dist_m / 1000 + fare_per_min * ride_time_s / 60
 
 
 def _downgrade_offer_to_d2d(sim, platform, offer):
@@ -55,21 +60,13 @@ def _downgrade_offer_to_d2d(sim, platform, offer):
 
 
 def _driver_s1_check(wait_time, fare, ride_speed):
-    """Stage 1 driver feasibility check: dispatch distance and minimum fare.
+    """Driver S1: reject if dispatch time exceeds 480s, or fare below EUR 0.10.
 
-    Rejects if dispatch distance exceeds 2000m (scaled by ride speed)
-    or if fare is below EUR 0.10.
-
-    Args:
-        wait_time: Dispatch time in seconds (vehicle to pickup)
-        fare: Offer fare in EUR
-        ride_speed: Current ride speed in m/s
-
-    Returns:
-        True if driver should REJECT (S1 fail), False if S1 passes.
+    The cap is fixed at 2000m / speeds.ride (~480s with speeds.ride=4.17).
+    It doesn't follow congestion. Under heavier traffic, wait_time grows from
+    the congested skim but the cap stays put, so peak-hour rejections go up.
+    Intentional: drivers won't spend more than ~8 min reaching a pickup.
     """
-    WAIT_DIST_LIMIT_M = 2000.0
-    MIN_FARE_EUR = 0.10
     wait_limit_s = WAIT_DIST_LIMIT_M / ride_speed
     return (wait_time >= wait_limit_s) or (fare < MIN_FARE_EUR)
 

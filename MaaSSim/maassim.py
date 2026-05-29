@@ -5,6 +5,7 @@
 ################################################################################
 
 
+from collections import Counter
 from dotmap import DotMap
 import pandas as pd
 import math
@@ -109,6 +110,7 @@ class Simulator:
         self.vehs = dict()  # list of vehicles
         self.plats = dict()  # list of platforms
         self.sim_start = None
+        self.unserved_by_reason = Counter()  # drop-point counters; see _bump_unserved
 
     def generate(self):
         # generate passengers and vehicles as agents in the simulation (inData stays intact)
@@ -140,10 +142,30 @@ class Simulator:
         self.logger.info("-------------------\tSimulation over\t\t-------------------")
         if len(self.reqQ) >= 0:
             self.logger.info(f"queue of requests {len(self.reqQ)}")
+        # any req still in a platform queue at sim end never got accepted
+        for plat in self.plats.values():
+            self.unserved_by_reason['still_in_queue_at_sim_end'] += len(plat.reqQ)
         self.logger.warning(f"simulation time {round(self.sim_end - self.sim_start, 1)} s")
+        t0 = time.time()
         self.make_res(run_id)
+        self.make_res_time = time.time() - t0
+        # tally terminal unserved buckets from already-built structures
+        outcomes = self.runs[run_id].outcomes
+        self.unserved_by_reason['patience_timeout'] += outcomes.count(travellerEvent.LOSES_PATIENCE.name)
+        self.unserved_by_reason['driver_pickup_patience_timeout'] += outcomes.count(travellerEvent.ARRIVES_AT_PICKUP.name)
+        req = self.inData.requests
+        if 'final_fare' in req.columns:
+            self.unserved_by_reason['fare_zero'] += int((req['final_fare'] == 0).sum())
+        for plat in self.plats.values():
+            self.unserved_by_reason['still_in_queue_at_sim_end'] += len(plat.reqQ)
+        self.logger.warning(f"make_res time {round(self.make_res_time, 1)} s")
         if self.params.get('assert_me', True):
+            t1 = time.time()
             self.assert_me()  # test consistency of results
+            self.assert_me_time = time.time() - t1
+            self.logger.warning(f"assert_me time {round(self.assert_me_time, 1)} s")
+        else:
+            self.assert_me_time = 0.0
 
     def make_and_run(self, run_id=None, **kwargs):
         # wrapper for the simulation routine
@@ -305,33 +327,36 @@ class Simulator:
             self.functions.timeout = self.timeout
 
     def make_skims(self):
-        # uses distance skim in meters to populate 4 skims used in simulations
+        # all four skims use [orig][dest] convention: skim[o][d] = cost o→d
+        # (pandas df[col][row] semantics, so col=dest, row=orig)
         self.skims = DotMap()
-        self.skims.dist = self.inData.skim.copy()  # directed driving distances
+        # raw CSV is df[dest][orig] — transpose once here
+        self.skims.dist = self.inData.skim.copy().T  # directed driving distances
 
         # Ride time skim — prefer pre-computed per-edge freeflow times if available,
         # otherwise fall back to flat speed division.
         if isinstance(getattr(self.inData, 'ride_time', None), pd.DataFrame):
-            # ride_time CSV: same convention as dist — df[dest][orig] = time orig→dest
-            # After .T: skims.ride_freeflow[orig][dest] = time orig→dest  ✓
+            # ride_time CSV also df[dest][orig] — .T gives [orig][dest]
             self.skims.ride_freeflow = self.inData.ride_time.T.astype(int)
             initial_factor = getattr(self.params.speeds, 'ride_congestion', 1.0)
             self._congestion_factor = initial_factor
             self.skims.ride = (self.skims.ride_freeflow * initial_factor).astype(int)
         else:
-            self.skims.ride = self.skims.dist.divide(self.params.speeds.ride).astype(int).T
+            self.skims.ride = self.skims.dist.divide(self.params.speeds.ride).astype(int)
 
         # Undirected walking distances — use pre-loaded matrix if available (fast),
         # otherwise compute via all-pairs Dijkstra and cache for subsequent calls.
+        # inData.walk_dist stored in raw [dest][orig] format (matches CSV convention).
         if isinstance(getattr(self.inData, 'walk_dist', None), pd.DataFrame):
-            self.skims.walk_dist = self.inData.walk_dist
+            self.skims.walk_dist = self.inData.walk_dist.T
         else:
             G_walk = self.inData.G.to_undirected()
             walk_skim_dict = dict(nx.all_pairs_dijkstra_path_length(G_walk, weight='length'))
+            # nx dict is dict[source][target] → pd.DataFrame → [orig][dest] (sources as cols)
             self.skims.walk_dist = pd.DataFrame(walk_skim_dict).fillna(
-                self.params.simulation.dist_threshold).T.astype(int)
-            self.inData.walk_dist = self.skims.walk_dist  # cache for subsequent calls
-        self.skims.walk = self.skims.walk_dist.divide(self.params.speeds.walk).astype(int).T
+                self.params.simulation.dist_threshold).astype(int)
+            self.inData.walk_dist = self.skims.walk_dist.T  # cache in raw [dest][orig] form
+        self.skims.walk = self.skims.walk_dist.divide(self.params.speeds.walk).astype(int)
 
         # cache NumPy-backed lookups for fast skim access in PUDO optimizer
         from MaaSSim.pudo_optimizer import _SkimLookup
@@ -357,7 +382,7 @@ class Simulator:
             self.skims.ride = (self.skims.ride_freeflow * factor).astype(int)
         else:
             effective_speed = self.params.speeds.ride / factor
-            self.skims.ride = self.skims.dist.divide(effective_speed).astype(int).T
+            self.skims.ride = self.skims.dist.divide(effective_speed).astype(int)
         self._congestion_factor = factor
         from MaaSSim.pudo_optimizer import _SkimLookup
         self.skims._ride = _SkimLookup(self.skims.ride)
@@ -401,7 +426,7 @@ class Simulator:
         self.vars.pickup = False
         self.vars.dropoff = False
         self.vars.shift = False
-        self.vars.pickup_patience = False
+        self.vars.driver_pickup_patience = False
 
     def cleanup(self):
         # break circular refs: agent.sim -> Simulator -> agent

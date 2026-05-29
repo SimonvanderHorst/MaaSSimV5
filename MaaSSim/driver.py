@@ -87,9 +87,8 @@ class VehicleAgent(object):
         self.disp()
 
     def disp(self):
-        """degugger"""
+        self.sim.logger.info(self.myrides[-1])
         if self.sim.params.simulation.sleep > 0:
-            self.sim.logger.info(self.myrides[-1])
             time.sleep(self.sim.params.simulation.sleep)
 
     def till_end(self):
@@ -149,9 +148,10 @@ class VehicleAgent(object):
                         self.update(event=driverEvent.ARRIVES_AT_PICKUP, pos=stage.node)  # vehicle arrived
                         # driver waits until traveller arrives (or patience)
                         yield self.sim.pax[stage.req_id].arrived_at_pick_up | \
-                              self.sim.timeout(self.sim.params.times.pickup_patience,
+                              self.sim.timeout(self.sim.params.times.driver_pickup_patience,
                                                variability=self.sim.vars.ride)
-                        if not self.sim.pax[stage.req_id].arrived_at_pick_up:  # if traveller did not arrive
+                        if not self.sim.pax[stage.req_id].arrived_at_pick_up.triggered:  # if traveller did not arrive
+                            self.sim.pax[stage.req_id].driver_no_show.succeed()  # tell pax we gave up
                             no_shows.append(stage.req_id)
                             break  # we do not serve this gentleman
                         self.update(event=driverEvent.MEETS_TRAVELLER_AT_PICKUP)

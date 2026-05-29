@@ -1,6 +1,6 @@
 {
   "NAME":"pudo_test",
-  "city":"Delft, Netherlands",
+  "city":["Delft, Netherlands", "Rijswijk, Netherlands"],
   "max_node_speed":50,
   "simulation":{
     "nP":200,
@@ -19,7 +19,7 @@
     "pickup":30,
     "dropoff":10,
     "patience":600,
-    "pickup_patience":90
+    "driver_pickup_patience":90
   },
   "speeds":{
     "walk":1.2,
@@ -28,10 +28,10 @@
     "congestion_schedule":[]
   },
   "paths":{
-    "G":"data/graphs/Delft.graphml",
-    "skim":"data/graphs/Delft_directed_driving.csv",
-    "skim_walk":"data/graphs/Delft_undirected_walk.csv",
-    "skim_ride_time":"data/graphs/Delft_directed_driving_time.csv"
+    "G":"data/graphs/Delft_Rijswijk.graphml",
+    "skim":"data/graphs/Delft_Rijswijk_directed_driving.csv",
+    "skim_walk":"data/graphs/Delft_Rijswijk_undirected_walk.csv",
+    "skim_ride_time":"data/graphs/Delft_Rijswijk_directed_driving_time.csv"
   },
   "demand_structure":{
     "origins_dispertion":-3.0E-4,
@@ -70,6 +70,7 @@
   "pudo":{
     "enabled":true,
     "rider_heterogeneity":true,
+    "rider_s1_delta":0.8,
     "max_walking_distance":200,
     "max_dispatch_ratio":2.0,
     "max_dispatch_distance":2000,

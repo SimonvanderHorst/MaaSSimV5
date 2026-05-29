@@ -149,10 +149,13 @@ def generate_demand(_inData, _params=None, avg_speed=False):
                                               axis=1)
         requests.dist = requests.apply(lambda request: _inData.skim.loc[request.origin, request.destination], axis=1)
 
-    requests['ttrav'] = requests.apply(lambda request: pd.Timedelta(request.dist, 's').floor('s'), axis=1)
-    # requests.ttrav = pd.to_timedelta(requests.ttrav)
     if avg_speed:
-        requests.ttrav = (pd.to_timedelta(requests.ttrav) / _params.speeds.ride).dt.floor('1s')
+        # dist is metres, speeds.ride is m/s → seconds
+        requests['ttrav'] = requests.apply(
+            lambda request: pd.Timedelta(request.dist / _params.speeds.ride, 's').floor('s'), axis=1)
+    else:
+        requests['ttrav'] = requests.apply(
+            lambda request: pd.Timedelta(request.dist, 's').floor('s'), axis=1)
     requests.tarr = [request.treq + request.ttrav for _, request in requests.iterrows()]
     requests = requests.sort_values('treq')
     requests.index = df.index

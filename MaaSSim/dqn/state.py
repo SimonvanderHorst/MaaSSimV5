@@ -56,8 +56,6 @@ class RewardRangeTracker:
         self.v_max = None
 
     def observe(self, reward):
-        if self.frozen:
-            return
         if reward < self.min:
             self.min = reward
         if reward > self.max:
@@ -82,19 +80,12 @@ class RewardRangeTracker:
         self.v_max = d['v_max']
 
 
-def build_state_vector(sim, platform, economics, match, params, beta_zero=0.0):
-    """15-dim raw state from offer context. Normalization handled by StateNormalizer."""
+def build_state_vector(sim, platform, economics, match, params, beta_zero, batch_counts,
+                       use_fleet_state=True):
+    """Raw state from offer context. 14-dim with fleet state, 10-dim without."""
     req_id = match['req_id']
     request = sim.inData.requests.loc[req_id]
     request_dist = float(request.dist)
-
-    n_available_veh = len(platform.vehQ)
-    n_req = max(len(platform.reqQ), 1)
-
-    # cyclical time-of-day
-    t_day = float(sim.t1)
-    now = float(sim.env.now)
-    angle = 2 * math.pi * now / t_day
 
     # -- base rider utility (split-independent) --
     behavioral = params.pudo.get('behavioral', {})
@@ -105,22 +96,18 @@ def build_state_vector(sim, platform, economics, match, params, beta_zero=0.0):
     walk_from_s = economics['walk_from_dropoff'] / walk_speed
     t_walk_min = (walk_to_s + walk_from_s) / 60.0
     t_wait_savings_min = min(walk_to_s, economics['wait_time']) / 60.0
-    base_rider = beta_wait * t_wait_savings_min - beta_walk_time * t_walk_min - beta_zero
+    base_rider_utility = beta_wait * t_wait_savings_min - beta_walk_time * t_walk_min - beta_zero
 
     # -- base driver utility (split-independent) --
     beta_time = behavioral.get('driver_beta_time', 0.004)
     beta_dist = params.pudo.operating_cost_per_km / 1000.0
     c_friction = behavioral.get('driver_C_friction', 0.15)
     is_pudo = (economics['delta_time_s'] != 0 or economics['delta_dist_m'] != 0)
-    base_driver = (beta_time * economics['delta_time_s']
+    base_driver_utility = (beta_time * economics['delta_time_s']
                    + beta_dist * economics['delta_dist_m']
                    - c_friction * is_pudo)
 
-    # fleet utilization: fraction of total fleet currently busy
-    total_fleet = len(sim.vehicles)
-    fleet_util = (total_fleet - n_available_veh) / max(total_fleet, 1)
-
-    state = np.array([
+    match_features = [
         economics['delta_pi'],
         economics['delta_dist_m'],
         economics['delta_time_s'],
@@ -129,13 +116,22 @@ def build_state_vector(sim, platform, economics, match, params, beta_zero=0.0):
         economics['baseline_fare'],
         request_dist,
         beta_zero,
-        min(n_available_veh / n_req, 5.0),
-        float(n_available_veh),
-        math.sin(angle),
-        math.cos(angle),
-        base_rider,
-        base_driver,
-        fleet_util,
-    ], dtype=np.float32)
+        base_rider_utility,
+        base_driver_utility,
+    ]
 
-    return state
+    if use_fleet_state:
+        n_available_veh = batch_counts['n_available_veh']
+        n_req = max(batch_counts['n_req'], 1)
+        angle = 2 * math.pi * float(sim.env.now) / float(sim.t1)
+        total_fleet = len(sim.vehicles)
+        fleet_util = (total_fleet - n_available_veh) / max(total_fleet, 1)
+
+        match_features[8:8] = [
+            min(n_available_veh / n_req, 5.0),
+            math.sin(angle),
+            math.cos(angle),
+        ]
+        match_features.append(fleet_util)
+
+    return np.array(match_features, dtype=np.float32)

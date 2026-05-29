@@ -4,6 +4,7 @@
 # Rafal Kucharski @ TU Delft, The Netherlands
 ################################################################################
 import time as _time
+from collections import Counter
 import pandas as pd
 
 from MaaSSim.pudo_optimizer import optimize_pudo_matching
@@ -13,8 +14,25 @@ from MaaSSim.traveller import travellerEvent
 
 from MaaSSim.decisions._helpers import (
     _compute_baseline_fare, _downgrade_offer_to_d2d, _driver_s1_check,
+    _safe_sigmoid,
 )
 from MaaSSim.decisions.rider import _d2d_ratio_check
+
+
+def _compute_rider_alpha(economics, pi_r, params, beta_zero):
+    behavioral = params.pudo.get('behavioral', {})
+    if not behavioral.get('enabled', False):
+        return 1.0
+    beta_walk_time = behavioral.get('rider_beta_walk_time', 0.24)
+    beta_wait = behavioral.get('rider_beta_wait', 0.22)
+    sigmoid_scale = behavioral.get('rider_sigmoid_scale', 1.0)
+    walk_speed = params.speeds.walk
+    walk_to_s = economics['walk_to_pickup'] / walk_speed
+    walk_from_s = economics['walk_from_dropoff'] / walk_speed
+    t_walk_min = (walk_to_s + walk_from_s) / 60.0
+    t_wait_savings_min = min(walk_to_s, economics['wait_time']) / 60.0
+    U_rider = pi_r * economics['delta_pi'] + beta_wait * t_wait_savings_min - beta_walk_time * t_walk_min - beta_zero
+    return _safe_sigmoid(sigmoid_scale * U_rider)
 
 
 # ─── Shared helper functions ────────────────────────────────────────────────
@@ -112,11 +130,10 @@ def _calculate_offer_economics(sim, platform, match, params):
     baseline_fare = _compute_baseline_fare(platform.platform, request.dist, d2d_ride_time)
 
     # Distance and time savings (D2D vs PUDO, including dispatch)
-    # Note: skim_dist[B][A] = forward distance from A to B (pandas col/row convention)
-    dist_d2d = float(sim.skims._dist[request.origin][vehicle.pos] +
-                      sim.skims._dist[request.destination][request.origin])
-    dist_pudo = float(sim.skims._dist[pickup_node][vehicle.pos] +
-                       sim.skims._dist[dropoff_node][pickup_node])
+    dist_d2d = float(sim.skims._dist[vehicle.pos][request.origin] +
+                      sim.skims._dist[request.origin][request.destination])
+    dist_pudo = float(sim.skims._dist[vehicle.pos][pickup_node] +
+                       sim.skims._dist[pickup_node][dropoff_node])
     delta_dist_m = dist_d2d - dist_pudo
 
     time_d2d = float(sim.skims._ride[vehicle.pos][request.origin] +
@@ -190,6 +207,7 @@ def _build_pudo_offers(sim, platform, simpaxes, veh_id, economics, match):
         if pax_beta is not None:
             offer['_rider_beta_zero'] = float(pax_beta)
 
+        offer['_veh_pos_at_match'] = int(sim.vehicles.loc[veh_id].pos)
         platform.offers[i] = offer
         sim.pax[i].offers[platform.platform.name] = offer
 
@@ -197,7 +215,7 @@ def _build_pudo_offers(sim, platform, simpaxes, veh_id, economics, match):
 # ─── Main offer creation and matching functions ─────────────────────────────
 
 
-def create_pudo_offer(sim, platform, match, params, decision_log=None):
+def create_pudo_offer(sim, platform, match, params, batch_counts, decision_log=None):
     """Create offer with PUDO pickup/dropoff locations.
 
     Implements the restructured acceptance pipeline:
@@ -246,125 +264,123 @@ def create_pudo_offer(sim, platform, match, params, decision_log=None):
                 walk_to_pickup_m=0, walk_from_dropoff_m=0,
                 outcome='already_assigned',
             )
-        return
+        return 'already_assigned'
 
     # Compute economics and build offers
     economics = _calculate_offer_economics(sim, platform, match, params)
     _build_pudo_offers(sim, platform, simpaxes, veh_id, economics, match)
 
-    # ── Stage 1: Baseline feasibility checks (both driver and rider) ──
+    # ── Stage 1: passive safety net. MILP already masked S1-infeasible cells. ──
+    # If either trips, it means the mask has a bug — log a warning and fall through.
     driver_s1_fail = _driver_s1_check(
         economics['wait_time'], economics['baseline_fare'], params.speeds.ride)
+    lead_offer = platform.offers[simpaxes[0]]
+    rider_s1_fail = _d2d_ratio_check(sim, simpax, lead_offer)
 
-    if driver_s1_fail:
-        _reject_offer(sim, platform, request, simpaxes, veh_id, req_id,
-                      rejected_by='driver', veh=veh)
-        offer_outcome = 'driver_declined'
+    if driver_s1_fail or rider_s1_fail:
+        sim.logger.warning(
+            f"S1 leaked past MILP: veh={veh_id} req={req_id} "
+            f"driver_fail={driver_s1_fail} rider_fail={rider_s1_fail}"
+        )
+        sim._s1_leaks = getattr(sim, '_s1_leaks', 0) + 1
 
-    else:
-        # Rider S1: D2D ratio check (overhead/trip ratio)
-        lead_offer = platform.offers[simpaxes[0]]
-        rider_s1_fail = _d2d_ratio_check(sim, simpax, lead_offer)
+    # MILP already masked S1-infeasible cells; always proceed to Stage 2.
+    for i in simpaxes:
+        platform.offers[i]['_rider_s1_passed'] = True
 
-        if rider_s1_fail:
-            # ratio too high for this vehicle — stay in queue for next batch
-            _reject_offer(sim, platform, request, simpaxes, veh_id, req_id,
-                          rejected_by='rider')
-            offer_outcome = 'rider_s1_declined'
+    # DQN override: choose incentive splits now that S1 passed
+    dqn_policy = getattr(sim, '_dqn_policy', None)
+    dqn_d2d_skip = False
+    _alpha_r_spec = None
+    if dqn_policy is not None and economics['delta_pi'] > 0:
+        from MaaSSim.dqn.state import build_state_vector
+        _beta_zero = float(sim.inData.passengers.loc[simpaxes[0]].get('beta_zero', 0.0))
+        state = build_state_vector(sim, platform, economics, match, params,
+                                   beta_zero=_beta_zero, batch_counts=batch_counts,
+                                   use_fleet_state=dqn_policy.agent.cfg.get('use_fleet_state', True))
+        pi_r, pi_d = dqn_policy.get_action(state)
+        _alpha_r_spec = None if pi_r == -1 else _compute_rider_alpha(economics, pi_r, params, _beta_zero)
 
-        else:
-            # Both S1 passed — mark offers and proceed to Stage 2
+        if pi_r == -1:
+            # DQN chose D2D skip — don't offer PUDO
+            dqn_d2d_skip = True
+            dqn_policy.stash_context({
+                'req_id': req_id, 'veh_id': veh_id,
+                'veh_pos': int(sim.vehicles.loc[veh_id].pos),
+                'origin': int(request.origin),
+                'destination': int(request.destination),
+                'pudo_pickup': -1, 'pudo_dropoff': -1,
+                'baseline_fare': economics['baseline_fare'],
+                'final_fare': economics['baseline_fare'],
+                'rider_discount': 0, 'delta_pi': economics['delta_pi'],
+                'delta_time_s': economics['delta_time_s'],
+                'walk_to_pickup_m': economics['walk_to_pickup'],
+                'walk_from_dropoff_m': economics['walk_from_dropoff'],
+                'wait_time': economics['wait_time'],
+                'request_dist': float(request.dist),
+            })
+            # downgrade to D2D and accept directly
             for i in simpaxes:
-                platform.offers[i]['_rider_s1_passed'] = True
+                _downgrade_offer_to_d2d(sim, platform, platform.offers[i])
+            _accept_offer(sim, platform, simpaxes, veh_id, req_id)
+            offer_outcome = 'dqn_d2d_skip'
+        else:
+            rider_discount = economics['delta_pi'] * pi_r
+            final_fare = max(economics['baseline_fare'] - rider_discount, 0)
+            dqn_policy.stash_context({
+                'req_id': req_id,
+                'veh_id': veh_id,
+                'veh_pos': int(sim.vehicles.loc[veh_id].pos),
+                'origin': int(request.origin),
+                'destination': int(request.destination),
+                'pudo_pickup': int(match['pickup_node']),
+                'pudo_dropoff': int(match['dropoff_node']),
+                'baseline_fare': economics['baseline_fare'],
+                'final_fare': final_fare,
+                'rider_discount': rider_discount,
+                'delta_pi': economics['delta_pi'],
+                'delta_time_s': economics['delta_time_s'],
+                'walk_to_pickup_m': economics['walk_to_pickup'],
+                'walk_from_dropoff_m': economics['walk_from_dropoff'],
+                'wait_time': economics['wait_time'],
+                'request_dist': float(request.dist),
+            })
+            for i in simpaxes:
+                platform.offers[i]['_pi_r'] = pi_r
+                platform.offers[i]['_pi_d'] = pi_d
+                platform.offers[i]['rider_incentive'] = rider_discount
+                platform.offers[i]['fare'] = final_fare
 
-            # DQN override: choose incentive splits now that S1 passed
-            dqn_policy = getattr(sim, '_dqn_policy', None)
-            dqn_d2d_skip = False
-            if dqn_policy is not None and economics['delta_pi'] > 0:
-                from MaaSSim.dqn.state import build_state_vector
-                _beta_zero = float(sim.inData.passengers.loc[simpaxes[0]].get('beta_zero', 0.0))
-                state = build_state_vector(sim, platform, economics, match, params,
-                                           beta_zero=_beta_zero)
-                pi_r, pi_d = dqn_policy.get_action(state)
-
-                if pi_r == -1:
-                    # DQN chose D2D skip — don't offer PUDO
-                    dqn_d2d_skip = True
-                    dqn_policy.stash_context({
-                        'req_id': req_id, 'veh_id': veh_id,
-                        'veh_pos': int(sim.vehicles.loc[veh_id].pos),
-                        'origin': int(request.origin),
-                        'destination': int(request.destination),
-                        'pudo_pickup': -1, 'pudo_dropoff': -1,
-                        'baseline_fare': economics['baseline_fare'],
-                        'final_fare': economics['baseline_fare'],
-                        'rider_discount': 0, 'delta_pi': economics['delta_pi'],
-                        'delta_time_s': economics['delta_time_s'],
-                        'walk_to_pickup_m': economics['walk_to_pickup'],
-                        'walk_from_dropoff_m': economics['walk_from_dropoff'],
-                        'wait_time': economics['wait_time'],
-                        'request_dist': float(request.dist),
-                    })
-                    # downgrade to D2D and accept directly
-                    for i in simpaxes:
-                        _downgrade_offer_to_d2d(sim, platform, platform.offers[i])
-                    _accept_offer(sim, platform, simpaxes, veh_id, req_id)
-                    offer_outcome = 'dqn_d2d_skip'
-                else:
-                    rider_discount = economics['delta_pi'] * pi_r
-                    final_fare = max(economics['baseline_fare'] - rider_discount, 0)
-                    dqn_policy.stash_context({
-                        'req_id': req_id,
-                        'veh_id': veh_id,
-                        'veh_pos': int(sim.vehicles.loc[veh_id].pos),
-                        'origin': int(request.origin),
-                        'destination': int(request.destination),
-                        'pudo_pickup': int(request.pudo_pickup_node) if pd.notna(request.get('pudo_pickup_node')) else int(request.origin),
-                        'pudo_dropoff': int(request.pudo_dropoff_node) if pd.notna(request.get('pudo_dropoff_node')) else int(request.destination),
-                        'baseline_fare': economics['baseline_fare'],
-                        'final_fare': final_fare,
-                        'rider_discount': rider_discount,
-                        'delta_pi': economics['delta_pi'],
-                        'delta_time_s': economics['delta_time_s'],
-                        'walk_to_pickup_m': economics['walk_to_pickup'],
-                        'walk_from_dropoff_m': economics['walk_from_dropoff'],
-                        'wait_time': economics['wait_time'],
-                        'request_dist': float(request.dist),
-                    })
-                    for i in simpaxes:
-                        platform.offers[i]['_pi_r'] = pi_r
-                        platform.offers[i]['_pi_d'] = pi_d
-                        platform.offers[i]['rider_incentive'] = rider_discount
-                        platform.offers[i]['fare'] = final_fare
-
-            if not dqn_d2d_skip:
-                # ── Stage 2: Behavioral checks (driver first, rider async) ──
-                if veh.f_driver_decline(veh=veh):
-                    # Driver S2 rejection — try D2D fallback
-                    offer_outcome = _handle_driver_s2_rejection(
-                        sim, platform, veh, params, simpaxes, veh_id, req_id,
-                        request, savings)
-                else:
-                    _accept_offer(sim, platform, simpaxes, veh_id, req_id)
-                    offer_outcome = 'accepted'
+    if not dqn_d2d_skip:
+        # ── Stage 2: Behavioral checks (driver first, rider async) ──
+        if veh.f_driver_decline(veh=veh):
+            # Driver S2 rejection — try D2D fallback
+            offer_outcome = _handle_driver_s2_rejection(
+                sim, platform, veh, params, simpaxes, veh_id, req_id,
+                request, savings)
+        else:
+            _accept_offer(sim, platform, simpaxes, veh_id, req_id)
+            offer_outcome = 'driver_accepted'
 
     # DQN outcome recording (only if get_action was called, i.e. S1 passed)
     dqn_policy = getattr(sim, '_dqn_policy', None)
     if dqn_policy is not None and dqn_policy._pending:
-        _accepted = (offer_outcome == 'accepted')
+        _driver_accepted = (offer_outcome == 'driver_accepted')
         lead_offer = platform.offers.get(simpaxes[0], {})
         dqn_policy.record_outcome(
             delta_pi=economics['delta_pi'],
             delta_dist_m=economics['delta_dist_m'],
-            accepted=_accepted,
+            driver_accepted=_driver_accepted,
             alpha_d=lead_offer.get('_driver_alpha'),
-            alpha_r=None,  # patched later by rider process
+            alpha_r=_alpha_r_spec,
         )
 
     # Log offer details
     if decision_log is not None:
         _log_offer_outcome(decision_log, sim, platform, simpaxes,
                            veh_id, req_id, match, economics, offer_outcome)
+
+    return offer_outcome
 
 
 def _handle_driver_s2_rejection(sim, platform, veh, params, simpaxes,
@@ -444,6 +460,12 @@ def f_match_pudo(**kwargs):
     vehQ_snapshot = list(platform.vehQ)
     reqQ_snapshot = list(platform.reqQ)
 
+    # frozen batch counts for DQN state — queues mutate as offers are accepted/rejected
+    batch_counts = {
+        'n_available_veh': len(vehQ_snapshot),
+        'n_req': len(reqQ_snapshot),
+    }
+
     # Create decision log if enabled
     log_level = params.pudo.get('decision_log_level', 'off')
     decision_log = None
@@ -459,9 +481,10 @@ def f_match_pudo(**kwargs):
 
     # Create offers for matched pairs
     t_d = _time.perf_counter()
+    outcomes = Counter()
     for match in matches:
-        create_pudo_offer(sim, platform, match, params,
-                          decision_log=decision_log)
+        outcomes[create_pudo_offer(sim, platform, match, params, batch_counts,
+                                    decision_log=decision_log)] += 1
     timing['phase_d_offers_s'] = _time.perf_counter() - t_d
 
     # Record batch history (lightweight mode skips match dicts)
@@ -472,6 +495,7 @@ def f_match_pudo(**kwargs):
         'vehQ_size': len(vehQ_snapshot),
         'reqQ_size': len(reqQ_snapshot),
         'num_matches': len(matches),
+        'outcomes': dict(outcomes),
         'timing': timing,
     }
     if not lightweight:
@@ -528,13 +552,28 @@ def f_match(**kwargs):
     while min(len(reqQ), len(vehQ)) > 0:  # loop until one of queues is empty (i.e. all requests handled)
         requests = sim.inData.requests.loc[reqQ]  # queued schedules of requests
         vehicles = sim.vehicles.loc[vehQ]  # vehicle agents
-        skimQ = sim.skims.ride[requests.origin].loc[vehicles.pos].copy()
+        # ride has cols=origins, index=destinations; we want time(veh→req.origin),
+        # i.e. col=veh.pos (orig), row=req.origin (dest). Then .T to get rows=veh, cols=req.
+        skimQ = sim.skims.ride[vehicles.pos].loc[requests.origin].T.copy()
         skimQ.index = vehicles.index    # vehicle IDs instead of positions (handles duplicate positions)
         skimQ.columns = requests.index  # request IDs instead of origins (handles duplicate origins)
         skimQ = skimQ.stack()  # travel times between requests and vehicles in column vector form
 
         skimQ = skimQ.drop(platform.tabu, errors='ignore')  # drop already rejected matches
 
+        # structural S1 mask: drop pairs with wait/ttrav > delta. same role as in
+        # the pudo milp — rider never sees these, so no rejection event.
+        if skimQ.shape[0] > 0:
+            delta = sim.params.pudo.get('rider_s1_delta', 0.8)
+            ttrav_col = requests.ttrav
+            if pd.api.types.is_timedelta64_dtype(ttrav_col):
+                ttrav_s = ttrav_col.dt.total_seconds()
+            else:
+                ttrav_s = ttrav_col.astype(float)
+            ttrav_s = ttrav_s.clip(lower=1)
+            req_ids = skimQ.index.get_level_values(1)
+            ratios = skimQ.values / ttrav_s.reindex(req_ids).values
+            skimQ = skimQ[ratios <= delta]
 
         if skimQ.shape[0] == 0:
             sim.logger.warning("Nobody likes each other, "
@@ -573,7 +612,8 @@ def f_match(**kwargs):
                 )
                 platform.offers[i] = offer
                 sim.pax[i].offers[platform.platform.name] = offer
-            if veh.f_driver_decline(veh=veh):  # allow driver reject the request
+            # S1 already masked upstream; only behavioral driver decline left.
+            if veh.f_driver_decline(veh=veh):
                 _reject_offer(sim, platform, request, simpaxes, veh_id, req_id,
                               rejected_by='driver', veh=veh)
             else:

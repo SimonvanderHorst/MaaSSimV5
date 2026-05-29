@@ -132,6 +132,7 @@ class PassengerAgent(object):
         self.found_veh = self.sim.env.event()  # I have found matching vehicle
         self.got_offered = self.sim.env.event()  # I got offered
         self.arrived_at_pick_up = self.sim.env.event()  # I arrived for pick up
+        self.driver_no_show = self.sim.env.event()  # driver gave up at pickup
         self.pickuped = self.sim.env.event()   # I got picked up
         self.dropoffed = self.sim.env.event()  # I got dropped off
 
@@ -166,9 +167,8 @@ class PassengerAgent(object):
         self.disp()
 
     def disp(self):
-        """degugger"""
+        self.sim.logger.info("{} {}".format(self.sim.print_now(), self.rides[-1]))
         if self.sim.params.simulation.sleep > 0:
-            print(self.sim.print_now(), self.rides[-1])
             time.sleep(self.sim.params.simulation.sleep)
 
     def leave_queues(self):
@@ -253,7 +253,13 @@ class PassengerAgent(object):
                     yield self.sim.timeout(10, variability=self.sim.vars.walk)
                 self.arrived_at_pick_up.succeed()
                 self.update(event=travellerEvent.ARRIVES_AT_PICKUP, pos=pickup_node)
-                yield self.arrived_at_pick_up & self.sim.vehs[self.veh.name].arrives_at_pick_up[self.id]
+                veh_arrival = self.sim.vehs[self.veh.name].arrives_at_pick_up[self.id]
+                yield (self.arrived_at_pick_up & veh_arrival) | self.driver_no_show
+                if self.driver_no_show.triggered:
+                    self.veh = None
+                    self.msg = 'driver gave up at pickup'
+                    self.sim.logger.info("pax {:>4}  {:40} {}".format(self.id, self.msg, self.sim.print_now()))
+                    return
                 self.update(event=travellerEvent.MEETS_DRIVER_AT_PICKUP)
                 yield self.sim.timeout(self.sim.params.times.pickup)  # vehicle waits until you board
                 self.pickuped.succeed()

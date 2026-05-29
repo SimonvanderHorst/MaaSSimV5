@@ -12,6 +12,7 @@ import pandas as pd
 from scipy.optimize import brute
 import logging
 import re
+import time
 
 
 def _make_schedule_nonshared(request):
@@ -80,6 +81,12 @@ def simulate_parallel(config="tests/config_parallel_test.json", inData=None, par
         inData.platforms = initialize_df(inData.platforms)
         inData.platforms.loc[0, 'fare'] = params.platform.fare_per_km
         inData.platforms.loc[0, 'fare_per_min'] = params.platform.fare_per_min
+        rm_name = params.platform.get('revenue_model', 'commission')
+        if rm_name not in params.platform.revenue_models:
+            raise KeyError(f"unknown revenue_model {rm_name!r}; known: {list(params.platform.revenue_models)}")
+        rm = params.platform.revenue_models[rm_name]
+        inData.platforms.loc[0, 'booking_fee'] = rm['booking_fee']
+        inData.platforms.loc[0, 'reward_type'] = rm['reward_type']
         inData.platforms.loc[0, 'name'] = 'Platform'
         inData.platforms.loc[0, 'batch_time'] = params.platform.batch_time
         inData.vehicles.platform = 0
@@ -132,6 +139,12 @@ def simulate(config="data/config.json", inData=None, params=None, **kwargs):
         inData.platforms = initialize_df(inData.platforms)
         inData.platforms.loc[0, 'fare'] = params.platform.fare_per_km
         inData.platforms.loc[0, 'fare_per_min'] = params.platform.fare_per_min
+        rm_name = params.platform.get('revenue_model', 'commission')
+        if rm_name not in params.platform.revenue_models:
+            raise KeyError(f"unknown revenue_model {rm_name!r}; known: {list(params.platform.revenue_models)}")
+        rm = params.platform.revenue_models[rm_name]
+        inData.platforms.loc[0, 'booking_fee'] = rm['booking_fee']
+        inData.platforms.loc[0, 'reward_type'] = rm['reward_type']
         inData.platforms.loc[0, 'name'] = 'Platform'
         inData.platforms.loc[0, 'batch_time'] = params.platform.batch_time
 
@@ -142,7 +155,9 @@ def simulate(config="data/config.json", inData=None, params=None, **kwargs):
 
     for day in range(params.simulation.nD):  # run iterations
         sim.make_and_run(run_id=day)  # prepare and SIM
+        t_out = time.time()
         sim.output()  # calc results
+        sim.logger.warning(f"output time {round(time.time() - t_out, 1)} s")
         if sim.functions.f_stop_crit(sim=sim):
             break
     return sim

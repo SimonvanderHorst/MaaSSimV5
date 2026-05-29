@@ -171,6 +171,10 @@ class PlatformAgent(object):
         # store actual fare paid (for revenue calculation in kpi_veh)
         self.sim.inData.requests.loc[offer['req_id'], 'final_fare'] = offer.get('fare', 0)
 
+        # wait-time decomposition: dispatch drive time (s) and vehicle position at match
+        self.sim.inData.requests.loc[offer['req_id'], 'dispatch_drive_s'] = float(offer.get('wait_time', 0) or 0)
+        self.sim.inData.requests.loc[offer['req_id'], 'veh_pos_at_match'] = int(offer.get('_veh_pos_at_match', -1))
+
         for i in offer['simpaxes']:
             self.sim.pax[i].update(event=travellerEvent.ACCEPTS_OFFER)
             self.sim.pax[i].found_veh.succeed()

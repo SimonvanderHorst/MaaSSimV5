@@ -11,6 +11,9 @@ class DQNIncentivePolicy:
         self.epsilon = 1.0
         self._pending = []  # list of {state, action_idx, ...} awaiting outcome
         self._transitions_raw = []  # completed (state, action_idx, reward)
+        # populated by train.py from sim platform.revenue_model
+        self.reward_type = 'commission'
+        self.booking_fee = 0.0
 
     def reset(self, epsilon):
         self.epsilon = epsilon
@@ -41,7 +44,7 @@ class DQNIncentivePolicy:
         if self._pending:
             self._pending[-1]['ctx'] = ctx
 
-    def record_outcome(self, delta_pi, delta_dist_m, accepted, alpha_d=None, alpha_r=None):
+    def record_outcome(self, delta_pi, delta_dist_m, driver_accepted, alpha_d=None, alpha_r=None):
         if not self._pending:
             return
         entry = self._pending.pop(-1)
@@ -51,11 +54,13 @@ class DQNIncentivePolicy:
         else:
             reward = compute_reward(
                 delta_pi, delta_dist_m,
-                entry['pi_r'], entry['pi_d'], accepted,
+                entry['pi_r'], entry['pi_d'], driver_accepted,
                 c_ext=self.agent.cfg['c_ext'],
                 alpha_d=alpha_d, alpha_r=alpha_r,
                 smoothed=self.agent.cfg['use_smoothed_reward'],
                 c_reject=self.agent.cfg.get('c_reject', 0.0),
+                reward_type=self.reward_type,
+                booking_fee=self.booking_fee,
             )
         t = {
             'state': entry['state'],
@@ -64,7 +69,7 @@ class DQNIncentivePolicy:
             'reward': reward,
             'pi_r': entry['pi_r'],
             'pi_d': entry['pi_d'],
-            'accepted': accepted,
+            'driver_accepted': driver_accepted,
             'delta_pi': delta_pi,
             'delta_dist_m': delta_dist_m,
             'alpha_r': alpha_r,
@@ -85,11 +90,13 @@ class DQNIncentivePolicy:
                 if self.agent.cfg['use_smoothed_reward'] and t['alpha_d'] is not None:
                     t['reward'] = compute_reward(
                         t['delta_pi'], t['delta_dist_m'],
-                        t['pi_r'], t['pi_d'], t['accepted'],
+                        t['pi_r'], t['pi_d'], t['driver_accepted'],
                         c_ext=self.agent.cfg['c_ext'],
                         alpha_d=t['alpha_d'], alpha_r=alpha_r,
                         smoothed=True,
                         c_reject=self.agent.cfg.get('c_reject', 0.0),
+                        reward_type=self.reward_type,
+                        booking_fee=self.booking_fee,
                     )
                 break
 
@@ -110,7 +117,10 @@ class DQNIncentivePolicy:
                 driver_chains.setdefault(vid, []).append(t)
 
         transitions = []
-        for chain in list(driver_chains.values()) + [[o] for o in orphans]:
+        self._mc_min = float('inf')
+        self._mc_max = float('-inf')
+        all_chains = list(driver_chains.values()) + [[o] for o in orphans]
+        for chain in all_chains:
             L = len(chain)
             for i in range(L):
                 # fold up to n_step rewards
@@ -129,12 +139,28 @@ class DQNIncentivePolicy:
                 transitions.append((
                     chain[i]['state'], chain[i]['action_idx'], G, next_state, done
                 ))
+            # MC return at position 0 for support calibration
+            mc = 0.0
+            for i in range(L - 1, -1, -1):
+                mc = chain[i]['reward'] + gamma * mc
+            if mc < self._mc_min:
+                self._mc_min = mc
+            if mc > self._mc_max:
+                self._mc_max = mc
         return transitions
 
-    _STATE_DIMS = ['s_delta_pi', 's_delta_dist_m', 's_delta_time_s', 's_d_walk',
+    _MATCH_DIMS = ['s_delta_pi', 's_delta_dist_m', 's_delta_time_s', 's_d_walk',
                    's_wait_time', 's_baseline_fare', 's_request_dist', 's_beta_zero',
-                   's_veh_req_ratio', 's_n_avail_veh', 's_sin_tod', 's_cos_tod',
-                   's_base_rider', 's_base_driver', 's_fleet_util']
+                   's_base_rider_utility', 's_base_driver_utility']
+    _FLEET_DIMS = ['s_veh_req_ratio', 's_sin_tod', 's_cos_tod']
+    _FLEET_TAIL = ['s_fleet_util']
+
+    @property
+    def _state_dims(self):
+        if self.agent.cfg.get('use_fleet_state', True):
+            return (self._MATCH_DIMS[:8] + self._FLEET_DIMS +
+                    self._MATCH_DIMS[8:] + self._FLEET_TAIL)
+        return self._MATCH_DIMS
 
     def get_match_rows(self, episode):
         rows = []
@@ -145,7 +171,7 @@ class DQNIncentivePolicy:
                 'action_idx': t['action_idx'],
                 'pi_r': t['pi_r'],
                 'pi_d': t['pi_d'],
-                'accepted': t['accepted'],
+                'driver_accepted': t['driver_accepted'],
                 'reward': t['reward'],
                 'delta_pi': t['delta_pi'],
                 'delta_dist_m': t['delta_dist_m'],
@@ -160,7 +186,7 @@ class DQNIncentivePolicy:
                 row.update(t['ctx'])
             raw = t.get('raw_state')
             if raw is not None:
-                for j, name in enumerate(self._STATE_DIMS):
+                for j, name in enumerate(self._state_dims):
                     row[name] = float(raw[j])
             rows.append(row)
         return rows
@@ -171,11 +197,11 @@ class DQNIncentivePolicy:
             return {'num_matches': 0, 'episode_reward': 0.0, 'acceptance_rate': 0.0,
                     'avg_pi_r': 0.0, 'avg_pi_d': 0.0, 'vkt_savings_m': 0.0}
 
-        accepted = sum(1 for t in self._transitions_raw if t['accepted'])
+        accepted = sum(1 for t in self._transitions_raw if t['driver_accepted'])
         total_reward = sum(t['reward'] for t in self._transitions_raw)
-        vkt = sum(t['delta_dist_m'] for t in self._transitions_raw if t['accepted'])
+        vkt = sum(t['delta_dist_m'] for t in self._transitions_raw if t['driver_accepted'])
         margin = sum(t['delta_pi'] * (1 - t['pi_r'] - t['pi_d'])
-                     for t in self._transitions_raw if t['accepted'])
+                     for t in self._transitions_raw if t['driver_accepted'])
 
         return {
             'num_matches': n,

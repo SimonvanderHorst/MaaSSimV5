@@ -1,25 +1,28 @@
 {
-  "state_dim": 15,
+  "state_dim": 14,
+  "use_fleet_state": true,
   "hidden_dims": [128, 128],
   "action_n_steps": 5,
 
   "gamma": 0.97,
   "lr": 0.0001,
-  "batch_size": 64,
+  "batch_size": 256,
   "buffer_capacity": 100000,
   "warmup_steps": 500,
-  "target_sync_every": 10,
+  "target_sync_tau": 0.005,
 
   "eps_start": 1.0,
   "eps_end": 0.05,
-  "eps_decay_steps": 75000,
+  "eps_decay_steps": 150000,
 
-  "c_ext": 1.0,
-  "c_reject": 0.5,
+  "c_ext": 2.0,
+  "c_reject": 0.25,
   "use_smoothed_reward": true,
 
   "n_atoms": 51,
-  "c51_support_margin": 0.2,
+  "c51_support_margin": 0.1,
+  "support_freeze_steps": 5000,
+  "support_refreeze_steps": 100000,
 
   "n_step": 5,
 

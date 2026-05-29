@@ -31,7 +31,8 @@ from MaaSSim.dqn.policy import DQNIncentivePolicy
 from MaaSSim.dqn import DQN_DEFAULTS
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-                           'tests', 'config_12h_peaks.json')
+                           'tests', 'final_calibration', 'configs',
+                           'pudo_milp_15s_2x_rijswijk.json')
 
 
 # ---------------------------------------------------------------------------
@@ -50,7 +51,8 @@ def compute_beta(global_step, cfg):
 
 
 def train(n_episodes=500, n_demand_seeds=5, base_seed=42, config_overrides=None,
-          resume_dir=None, model_filename='final_model.pt'):
+          resume_dir=None, model_filename='final_model.pt', revenue_model=None,
+          out_dir=None):
 
     start_episode = 0
 
@@ -94,7 +96,7 @@ def train(n_episodes=500, n_demand_seeds=5, base_seed=42, config_overrides=None,
         match_header_written = False
 
         # output dir
-        run_dir = os.path.join('results', 'dqn', datetime.now().strftime('%Y%m%d_%H%M%S'))
+        run_dir = out_dir or os.path.join('results', 'dqn', datetime.now().strftime('%Y%m%d_%H%M%S'))
         os.makedirs(run_dir, exist_ok=True)
 
         # save configs for reproducibility
@@ -125,6 +127,20 @@ def train(n_episodes=500, n_demand_seeds=5, base_seed=42, config_overrides=None,
             shared_net = inData  # first load becomes the shared network
         demand_pool.append((inData, params))
         print(f"  seed {base_seed + i}: {time.perf_counter() - t0:.1f}s")
+
+    # resolve revenue model from sim platform registry, wire onto policy
+    if revenue_model is not None:
+        for _, _params in demand_pool:
+            _params.platform.revenue_model = revenue_model
+    _plat = demand_pool[0][1].platform
+    _rm_name = _plat.get('revenue_model', 'commission')
+    if _rm_name not in _plat.revenue_models:
+        raise KeyError(f"unknown revenue_model {_rm_name!r}; known: {list(_plat.revenue_models)}")
+    _rm = _plat.revenue_models[_rm_name]
+    policy.reward_type = _rm['reward_type']
+    policy.booking_fee = _rm['booking_fee']
+    print(f"revenue_model: {_rm_name} "
+          f"(reward_type={policy.reward_type}, booking_fee={policy.booking_fee})")
 
     for ep in range(start_episode, start_episode + n_episodes):
         eps = compute_epsilon(agent.global_step, cfg)
@@ -160,6 +176,9 @@ def train(n_episodes=500, n_demand_seeds=5, base_seed=42, config_overrides=None,
         sim_myinit_s = t_generate - t_init
         sim_generate_s = t_simulate - t_generate
         sim_simulate_s = t_done - t_simulate
+        sim_envrun_s = sim.sim_end - sim.sim_start
+        sim_makeres_s = sim.make_res_time
+        sim_assertme_s = sim.assert_me_time
 
         # sum PUDO phase timings across all batches
         phase_keys = ['phase_a_feasibility_s', 'phase_b_cost_matrix_s',
@@ -172,6 +191,8 @@ def train(n_episodes=500, n_demand_seeds=5, base_seed=42, config_overrides=None,
         # harvest transitions then free sim memory
         transitions = policy.get_episode_transitions()
         agent.store_transitions(transitions)
+        if policy._mc_min != float('inf'):
+            agent.observe_mc_range(policy._mc_min, policy._mc_max)
         sim.cleanup()
         del sim
         gc.collect()
@@ -190,10 +211,22 @@ def train(n_episodes=500, n_demand_seeds=5, base_seed=42, config_overrides=None,
                     agent.buffer.buf[i] = (
                         agent.normalizer.normalize(s), a, r,
                         agent.normalizer.normalize(ns), d)
+            print(f"  normalizer frozen (n={agent.normalizer.n})")
+
+        # freeze c51 support after enough episodes to observe real return range
+        support_freeze = cfg.get('support_freeze_steps', cfg['warmup_steps'])
+        if agent.global_step >= support_freeze and not agent.reward_tracker.frozen:
             agent.freeze_support()
             rt = agent.reward_tracker
-            print(f"  normalizer frozen (n={agent.normalizer.n})")
-            print(f"  c51 support: [{agent.v_min}, {agent.v_max}] (observed [{rt.min:.3f}, {rt.max:.3f}])")
+            print(f"  c51 support frozen: [{agent.v_min}, {agent.v_max}] (observed [{rt.min:.3f}, {rt.max:.3f}])")
+
+        # refreeze with trained-policy MC returns
+        refreeze = cfg.get('support_refreeze_steps')
+        if refreeze and agent.global_step >= refreeze and not getattr(agent, '_refrozen', False):
+            old = (agent.v_min, agent.v_max)
+            agent.freeze_support()
+            agent._refrozen = True
+            print(f"  c51 support re-frozen: [{agent.v_min}, {agent.v_max}] (was [{old[0]}, {old[1]}])")
 
         # train from buffer
         if agent.global_step >= cfg['warmup_steps']:
@@ -201,10 +234,7 @@ def train(n_episodes=500, n_demand_seeds=5, base_seed=42, config_overrides=None,
             beta = compute_beta(agent.global_step, cfg) if agent.use_per else None
             for _ in range(n_train):
                 loss = agent.train_step(beta=beta)
-
-        # periodic target sync
-        if ep > 0 and ep % cfg['target_sync_every'] == 0:
-            agent.sync_target()
+                agent.sync_target()
 
         # per-match log (append to file, don't keep in memory)
         ep_match_rows = policy.get_match_rows(ep)
@@ -244,6 +274,9 @@ def train(n_episodes=500, n_demand_seeds=5, base_seed=42, config_overrides=None,
             'phase_b_s': phase_sums['phase_b_cost_matrix_s'],
             'phase_c_s': phase_sums['phase_c_solve_s'],
             'phase_d_s': phase_sums['phase_d_offers_s'],
+            'sim_envrun_s': sim_envrun_s,
+            'sim_makeres_s': sim_makeres_s,
+            'sim_assertme_s': sim_assertme_s,
             'optimizer_total_s': sum(v for k, v in phase_sums.items() if k in phase_keys),
             'rss_mb': psutil.Process().memory_info().rss / 1024 / 1024,
         }
@@ -273,5 +306,8 @@ if __name__ == '__main__':
     parser.add_argument('--episodes', type=int, default=300)
     parser.add_argument('--resume', type=str, default=None, help='path to run dir to resume')
     parser.add_argument('--model', type=str, default='final_model.pt', help='checkpoint filename to load on resume')
+    parser.add_argument('--revenue-model', type=str, default=None,
+                        help='override sim config platform.revenue_model selector')
     args = parser.parse_args()
-    train(n_episodes=args.episodes, resume_dir=args.resume, model_filename=args.model)
+    train(n_episodes=args.episodes, resume_dir=args.resume, model_filename=args.model,
+          revenue_model=args.revenue_model)

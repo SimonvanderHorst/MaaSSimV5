@@ -98,10 +98,8 @@ def f_repos(*args, **kwargs):
 def f_pudo_driver_decline(*args, **kwargs):
     """Two-stage driver decline: distance-based baseline check + PUDO behavioral increment.
 
-    Stage 1 (all offers): Distance-based wait check — reject if dispatch
-    distance exceeds 2000m (equivalent to 200s at 36 km/h). The threshold
-    scales with ride speed so that low-speed scenarios (congestion) are not
-    penalised by a fixed time limit. Fare floor: EUR 0.10.
+    Stage 1 (all offers): Fixed 480s cap on dispatch time (2000m / speeds.ride).
+    Peak-hour rejection rises with congestion (intended). Fare floor: EUR 0.10.
 
     Stage 2 (PUDO only): Sigmoid on PUDO-incremental utility:
     U_pudo = (λ·π_d - 1)·ΔΠ + β_time·Δtime + β_dist·Δdist - C_friction

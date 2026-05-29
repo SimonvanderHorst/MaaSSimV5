@@ -1,4 +1,6 @@
+import os
 import random
+import tempfile
 import numpy as np
 import torch
 import torch.nn as nn
@@ -22,15 +24,15 @@ class C51Network(nn.Module):
         prev = state_dim
         for h in hidden_dims[:-1]:
             shared.append(nn.Linear(prev, h))
-            shared.append(nn.ReLU())
+            shared.append(nn.GELU())
             prev = h
         self.features = nn.Sequential(*shared)
 
         d = hidden_dims[-1]
         self.val_stream = nn.Sequential(
-            nn.Linear(prev, d), nn.ReLU(), nn.Linear(d, n_atoms))
+            nn.Linear(prev, d), nn.GELU(), nn.Linear(d, n_atoms))
         self.adv_stream = nn.Sequential(
-            nn.Linear(prev, d), nn.ReLU(), nn.Linear(d, n_actions * n_atoms))
+            nn.Linear(prev, d), nn.GELU(), nn.Linear(d, n_actions * n_atoms))
 
     def forward(self, x):
         feat = self.features(x)
@@ -48,7 +50,7 @@ class DQNAgent:
         self.action_table = build_action_table(cfg['action_n_steps'])
         n_actions = len(self.action_table)
 
-        # C51 distributional params — placeholders until freeze_support()
+        # C51 distributional params, these are placeholders until freeze_support()
         self.n_atoms = cfg['n_atoms']
         self.v_min = 0.0
         self.v_max = 1.0
@@ -62,7 +64,7 @@ class DQNAgent:
         self.target_net.load_state_dict(self.q_net.state_dict())
         self.target_net.eval()
 
-        self.optimizer = optim.Adam(self.q_net.parameters(), lr=cfg['lr'])
+        self.optimizer = optim.Adam(self.q_net.parameters(), lr=cfg['lr']) # Adam is the simplest choice for C51, no need for RAdam or AdamW I think
 
         self.buffer = PrioritizedReplayBuffer(
             cfg['buffer_capacity'],
@@ -74,13 +76,13 @@ class DQNAgent:
         self.global_step = 0
         self._last_loss = None
 
-    def select_action(self, state, epsilon):
-        with torch.no_grad():
+    def select_action(self, state, epsilon): 
+        with torch.no_grad(): 
             probs = self.q_net(torch.tensor(state, dtype=torch.float32).unsqueeze(0)).squeeze(0)
             q = (probs * self.support).sum(dim=-1)  # expected Q per action
         q_max = float(q.max())
         q_mean = float(q.mean())
-        if random.random() < epsilon:
+        if random.random() < epsilon: # epsilon-greedy exploration
             action = random.randrange(len(self.action_table))
         else:
             action = int(q.argmax().item())
@@ -99,10 +101,10 @@ class DQNAgent:
         """Full C51 output: probs (n_actions, n_atoms), support (n_atoms,)."""
         with torch.no_grad():
             probs = self.q_net(torch.tensor(state, dtype=torch.float32).unsqueeze(0)).squeeze(0)
-        return probs.numpy(), self.support.numpy()
+        return probs.numpy(), self.support.numpy() 
 
     def train_step(self, beta=None):
-        if len(self.buffer) < self.cfg['batch_size']:
+        if len(self.buffer) < self.cfg['batch_size']: 
             return None
 
         states, actions, rewards, next_states, dones, indices, weights = \
@@ -126,7 +128,7 @@ class DQNAgent:
             next_q = (next_probs_online * self.support).sum(dim=-1)
             best_actions = next_q.argmax(dim=1)
 
-            next_probs_target = self.target_net(next_states_t)
+            next_probs_target = self.target_net(next_states_t) 
             next_dist = next_probs_target[range(B), best_actions]  # (B, n_atoms)
 
             # project: Tz = r + gamma^n * support, clipped to [v_min, v_max]
@@ -157,6 +159,7 @@ class DQNAgent:
 
         self.optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.q_net.parameters(), max_norm=10.0)
         self.optimizer.step()
 
         # PER priorities: per-sample cross-entropy (always positive)
@@ -166,21 +169,26 @@ class DQNAgent:
         return self._last_loss
 
     def sync_target(self):
-        self.target_net.load_state_dict(self.q_net.state_dict())
+        tau = self.cfg.get('target_sync_tau', 0.005)
+        for tp, op in zip(self.target_net.parameters(), self.q_net.parameters()):
+            tp.data.copy_(tau * op.data + (1 - tau) * tp.data)
 
     def freeze_support(self):
-        if not self.reward_tracker.frozen:
-            self.reward_tracker.freeze(margin=self._support_margin)
+        self.reward_tracker.freeze(margin=self._support_margin)
         self.v_min = self.reward_tracker.v_min
         self.v_max = self.reward_tracker.v_max
         self.support = torch.linspace(self.v_min, self.v_max, self.n_atoms)
         self.delta_z = (self.v_max - self.v_min) / (self.n_atoms - 1)
+        self.target_net.load_state_dict(self.q_net.state_dict())
 
     def store_transitions(self, transitions):
         for s, a, r, ns, d in transitions:
-            self.reward_tracker.observe(r)
             self.buffer.push(s, a, r, ns, d)
             self.global_step += 1
+
+    def observe_mc_range(self, mc_min, mc_max):
+        self.reward_tracker.observe(mc_min)
+        self.reward_tracker.observe(mc_max)
 
     def save(self, path, include_buffer=True):
         data = {
@@ -198,9 +206,18 @@ class DQNAgent:
             data['buffer_write_idx'] = self.buffer.write_idx
             data['buffer_size'] = self.buffer.size
             data['buffer_max_priority'] = self.buffer.max_priority
-        torch.save(data, path)
+        # atomic write: temp file + replace so a crash mid-save (rip) can't corrupt the checkpoint
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path), suffix='.tmp')
+        try:
+            os.close(tmp_fd)
+            torch.save(data, tmp_path)
+            os.replace(tmp_path, path)
+        except BaseException:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
 
-    def load(self, path):
+    def load(self, path): # load entire checkpoint including buffer and normalizer 
         ckpt = torch.load(path, map_location='cpu')
         self.q_net.load_state_dict(ckpt['q_net'])
         self.target_net.load_state_dict(ckpt['target_net'])

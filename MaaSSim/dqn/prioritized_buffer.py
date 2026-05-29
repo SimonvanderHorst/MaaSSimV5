@@ -37,11 +37,11 @@ class PrioritizedReplayBuffer:
 
         indices = []
         segment = 1.0 / batch_size
-        for i in range(batch_size):
-            lo = segment * i
-            hi = segment * (i + 1)
-            s = random.uniform(lo, hi)
-            idx = int(np.searchsorted(cdf, s))
+        for batch_idx in range(batch_size):
+            lower_bound = segment * batch_idx
+            upper_bound = segment * (batch_idx + 1)
+            sample_point = min(random.uniform(lower_bound, upper_bound), cdf[-1])
+            idx = np.searchsorted(cdf, sample_point, side='left').item()
             idx = min(idx, self.size - 1)
             indices.append(idx)
 

@@ -105,7 +105,8 @@ def kpi_veh(*args, **kwargs):
         try:
             pickup = req.get('pudo_pickup_node', None)
             if pd.notna(pickup):
-                return float(sim.skims.dist.at[int(pickup), int(req.pudo_dropoff_node)])
+                # dist is [orig][dest] — pandas .at[row=dest, col=orig]
+                return float(sim.skims.dist.at[int(req.pudo_dropoff_node), int(pickup)])
         except (KeyError, ValueError, TypeError):
             pass
         return float(req.dist)

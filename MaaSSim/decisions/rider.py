@@ -45,19 +45,27 @@ def f_mode(*args, **kwargs):
 
 
 def _d2d_ratio_check(sim, traveller, offer):
-    """Standard D2D rider quality check (same as f_mode).
+    """S1 ratio check: reject if (max(walk_to_pickup, wait) + walk_from_dropoff)/ttrav > delta.
 
-    Returns True if rider REJECTS (overhead/trip ratio > 0.5).
-    Used as Stage 1 baseline for both D2D and PUDO offers.
+    walk-to-pickup and driver dispatch happen in parallel — they arrive at the hub
+    together, so the rider's perceived out-of-vehicle time is max(walk, wait), not
+    the sum. Consistent with Stage 2's t_wait_savings = min(walk, wait).
     """
-    pass_walk_time = sim.skims.walk[traveller.pax.pos][traveller.request.origin]
-    veh_pickup_time = offer.get('wait_time', 0)
-    pass_matching_time = sim.env.now - traveller.t_matching
+    walk_speed = sim.params.speeds.walk  # m/s
+    t_walk_pickup_s = offer.get('walk_to_pickup', 0) / walk_speed
+    t_walk_dropoff_s = offer.get('walk_from_dropoff', 0) / walk_speed
+    wait_s = offer.get('wait_time', 0)
+    # patience guard: pax must reach pickup before driver no-shows
+    patience_s = sim.params.times.driver_pickup_patience
+    transaction_s = sim.params.times.transaction
+    if t_walk_pickup_s + transaction_s > wait_s + patience_s:
+        return True
     tt = traveller.request.ttrav
     tt_seconds = tt.total_seconds() if hasattr(tt, 'total_seconds') else float(tt)
     if tt_seconds <= 0:
         return False
-    return (max(pass_walk_time, veh_pickup_time) + pass_matching_time) / tt_seconds > 0.5
+    delta = sim.params.pudo.get('rider_s1_delta', 0.8)
+    return (max(t_walk_pickup_s, wait_s) + t_walk_dropoff_s) / tt_seconds > delta
 
 
 def f_pudo_rider_mode(*args, **kwargs):

@@ -133,3 +133,17 @@ cache/
 dumps/
 results/
 nul
+
+# Local-only data archives + large/regenerable graph & skim files
+data/config_unused/
+data/graphs/Delft_Rijswijk*
+
+# Experiment result outputs (root-level)
+/*.csv
+*.pdf
+
+# Scratch / local tooling
+.vscode/
+drawio/
+tests/Random tests/
+tests/final_calibration/
