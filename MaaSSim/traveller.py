@@ -151,8 +151,7 @@ class PassengerAgent(object):
         self.pax.event = event
         if pos:
             self.pax.pos = pos  # update position
-        if db_update:
-            self.sim.passengers.loc[self.pax.name] = self.pax
+        # sim.passengers sync deferred to make_res - nothing reads it mid-run
         self.append_stage()
 
     def append_stage(self):
@@ -193,7 +192,7 @@ class PassengerAgent(object):
             if self.schedule_leader:  # single ride, or you are requesting a shared ride
                 yield self.sim.timeout((self.request.treq - self.sim.t0).seconds,
                                        variability=self.sim.vars.start)  # wait IDLE until the request time
-                self.sim.requests.loc[len(self.sim.requests.index) + 1] = self.request  # append request
+                self.sim.req_log.append(self.request)  # logged, sim.requests built in make_res
                 self.update(event=travellerEvent.REQUESTS_RIDE)
 
                 self.t_matching = self.sim.env.now

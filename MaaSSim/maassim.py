@@ -104,6 +104,7 @@ class Simulator:
         self.rides = list()  # report of rides
         self.passengers = self.inData.passengers.copy()
         self.requests = initialize_df(self.inData.requests)  # init requests
+        self.req_log = list()  # requests as they come in, df built once in make_res
         self.reqQ = list()  # queue of requests (traveller ids)
         self.vehQ = list()  # queue of idle vehicles (driver ids)
         self.pax = dict()  # list of passengers
@@ -185,6 +186,13 @@ class Simulator:
             else:
                 run_id = 0
         self.run_ids.append(run_id)
+        # deferred bookkeeping - per-event df writes were the sim bottleneck
+        if self.req_log:
+            self.requests = pd.DataFrame(self.req_log)
+            self.requests.index = range(1, len(self.req_log) + 1)
+        if self.pax:
+            self.passengers['pos'] = pd.Series({i: self.pax[i].pax.pos for i in self.pax})
+            self.passengers['event'] = pd.Series({i: self.pax[i].pax.event for i in self.pax})
         trips = pd.concat([pd.DataFrame(self.pax[pax].rides) for pax in self.pax.keys()])
         outcomes = [self.pax[pax].rides[-1]['event'] for pax in self.pax.keys()]
         rides = pd.concat([pd.DataFrame(self.vehs[pax].myrides) for pax in self.vehs.keys()])

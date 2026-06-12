@@ -71,7 +71,12 @@ class VehicleAgent(object):
         if pos:
             self.veh.pos = pos  # update position
         if db_update:
-            self.sim.vehicles.loc[self.id] = self.veh
+            # matcher reads sim.vehicles.pos live, so keep the frame current -
+            # but scalar .at writes, full-row .loc was ~5ms/call
+            if event:
+                self.sim.vehicles.at[self.id, 'event'] = event
+            if pos:
+                self.sim.vehicles.at[self.id, 'pos'] = pos
         self.append_ride()
 
     def append_ride(self):

@@ -142,6 +142,15 @@ class PlatformAgent(object):
                                                           self.sim.print_now()))
         self.appendVeh(offer['veh_id'])  # bring this vehicle back to the queue
 
+    def _set_req(self, req_id, col, val):
+        # .at is ~100x cheaper than .loc per cell; first write per column stays .loc
+        # so column creation + dtype upcasts match the old behaviour exactly
+        req = self.sim.inData.requests
+        if col in req.columns:
+            req.at[req_id, col] = val
+        else:
+            req.loc[req_id, col] = val
+
     def handle_accepted(self, offer_id):
         """
         triggered when offer made earlier is accepted by traveller
@@ -155,12 +164,12 @@ class PlatformAgent(object):
         # If this is a PUDO offer, save the PUDO fields to the request DataFrame
         if offer.get('pudo_enabled', False):
             req_id = offer['req_id']
-            self.sim.inData.requests.loc[req_id, 'pudo_pickup_node'] = offer['pickup_node']
-            self.sim.inData.requests.loc[req_id, 'pudo_dropoff_node'] = offer['dropoff_node']
-            self.sim.inData.requests.loc[req_id, 'walk_to_pickup_dist'] = offer['walk_to_pickup']
-            self.sim.inData.requests.loc[req_id, 'walk_from_dropoff_dist'] = offer['walk_from_dropoff']
-            self.sim.inData.requests.loc[req_id, 'pudo_savings'] = offer['savings']
-            self.sim.inData.requests.loc[req_id, 'pudo_d2d_fallback'] = offer.get('_d2d_fallback', False)
+            self._set_req(req_id, 'pudo_pickup_node', offer['pickup_node'])
+            self._set_req(req_id, 'pudo_dropoff_node', offer['dropoff_node'])
+            self._set_req(req_id, 'walk_to_pickup_dist', offer['walk_to_pickup'])
+            self._set_req(req_id, 'walk_from_dropoff_dist', offer['walk_from_dropoff'])
+            self._set_req(req_id, 'pudo_savings', offer['savings'])
+            self._set_req(req_id, 'pudo_d2d_fallback', offer.get('_d2d_fallback', False))
 
             # Rewrite schedule nodes so the SimPy processes drive/walk the PUDO route
             if not offer.get('_d2d_fallback', False):
@@ -169,11 +178,11 @@ class PlatformAgent(object):
                 schedule.loc[schedule.od == 'd', 'node'] = offer['dropoff_node']
 
         # store actual fare paid (for revenue calculation in kpi_veh)
-        self.sim.inData.requests.loc[offer['req_id'], 'final_fare'] = offer.get('fare', 0)
+        self._set_req(offer['req_id'], 'final_fare', offer.get('fare', 0))
 
         # wait-time decomposition: dispatch drive time (s) and vehicle position at match
-        self.sim.inData.requests.loc[offer['req_id'], 'dispatch_drive_s'] = float(offer.get('wait_time', 0) or 0)
-        self.sim.inData.requests.loc[offer['req_id'], 'veh_pos_at_match'] = int(offer.get('_veh_pos_at_match', -1))
+        self._set_req(offer['req_id'], 'dispatch_drive_s', float(offer.get('wait_time', 0) or 0))
+        self._set_req(offer['req_id'], 'veh_pos_at_match', int(offer.get('_veh_pos_at_match', -1)))
 
         for i in offer['simpaxes']:
             self.sim.pax[i].update(event=travellerEvent.ACCEPTS_OFFER)
