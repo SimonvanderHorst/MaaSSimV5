@@ -29,7 +29,8 @@ _asc_probs = _asc_probs / _asc_probs.sum()
 
 def _sample_beta_zero(n, seed=None):
     """Sample per-rider beta_zero (EUR) from empirical ASC DTD distribution."""
-    rng = np.random.RandomState(seed)
+    # no seed -> global stream, so np.random.seed() upstream actually pins these draws
+    rng = np.random if seed is None else np.random.RandomState(seed)
     idx = rng.choice(len(_asc_probs), size=n, p=_asc_probs)
     u = rng.uniform(0, 1, size=n)
     return (_asc_lows[idx] + u * (_asc_highs[idx] - _asc_lows[idx])) * 0.60  # AUD->EUR
